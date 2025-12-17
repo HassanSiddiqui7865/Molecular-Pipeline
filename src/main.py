@@ -1,0 +1,193 @@
+"""
+Main Orchestration Script
+Coordinates Perplexity search and LangChain-based extraction using LangGraph.
+"""
+import json
+import sys
+import logging
+from pathlib import Path
+from typing import Dict
+
+# Add src to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "src"))
+
+from nodes.search_node import PerplexitySearch
+from graph import create_pipeline_graph, run_pipeline
+from schemas import OutputData
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+
+
+def save_output(data: Dict, output_path: str):
+    """Save extracted data to JSON file."""
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Output saved to: {output_path}")
+
+
+def get_cache_filename(inputs: Dict) -> Path:
+    """Generate cache filename based on input parameters."""
+    import hashlib
+    cache_key = f"{inputs.get('pathogen_name', '')}_{inputs.get('resistant_gene', '')}_{inputs.get('pathogen_count', '')}_{inputs.get('severity_codes', '')}"
+    cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
+    return project_root / "output" / f"perplexity_cache_{cache_hash}.json"
+
+
+def load_cached_search_results(cache_path: Path) -> Dict:
+    """Load cached search results if they exist."""
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if 'search_results' in data:
+                    logger.info(f"Loading cached search results from {cache_path}")
+                    return data
+        except Exception as e:
+            logger.warning(f"Error loading cache: {e}")
+    return None
+
+
+def main():
+    """Main execution function."""
+    # Load configuration from environment variables
+    from config import get_perplexity_config
+    perplexity_config = get_perplexity_config()
+    
+    if not perplexity_config.get('api_key') or perplexity_config.get('api_key') == 'YOUR_PERPLEXITY_API_KEY':
+        logger.error("Please set your PERPLEXITY_API_KEY in .env file")
+        sys.exit(1)
+    
+    perplexity = PerplexitySearch(
+        api_key=perplexity_config['api_key'],
+        max_tokens=perplexity_config.get('max_tokens', 50000),
+        max_tokens_per_page=perplexity_config.get('max_tokens_per_page', 4096)
+    )
+    
+    # Ollama configuration is now handled in each node that needs it
+    
+    # Get user inputs
+    inputs = {
+        'pathogen_name': 'Enterococcus faecium',
+        'resistant_gene': 'vanA',
+        'pathogen_count': '10^5 CFU/ML',
+        'severity_codes': 'A41.9, B95.3',
+        'age': 45 
+    }
+
+    # inputs = {
+    #     'pathogen_name': 'Staphylococcus aureus',
+    #     'resistant_gene': 'mecA',
+    #     'pathogen_count': '10^6 CFU/ML',
+    #     'severity_codes': 'A41.2, B95.6',
+    #     'age': 32
+    # }
+    
+    # Allow override via command-line arguments
+    if len(sys.argv) > 1:
+        for arg in sys.argv[1:]:
+            if '=' in arg:
+                key, value = arg.split('=', 1)
+                inputs[key] = value
+    
+    logger.info(f"Input parameters: {inputs}")
+    
+    # Check for cached search results - always use if available
+    cache_path = get_cache_filename(inputs)
+    cached_data = load_cached_search_results(cache_path)
+    
+    # Create LangGraph pipeline
+    graph = create_pipeline_graph()
+    
+    # Run pipeline
+    logger.info("Running LangGraph pipeline...")
+    max_search_results = perplexity_config.get('max_search_results', 10)
+    final_state = run_pipeline(
+        graph=graph,
+        input_parameters=inputs,
+        perplexity_client=perplexity,
+        max_search_results=max_search_results,
+        cached_search_results=cached_data,
+        cache_path=str(cache_path)
+    )
+    
+    # Prepare final output
+    output_data = {
+        'input_parameters': final_state.get('input_parameters', inputs),
+        'extraction_date': final_state.get('extraction_date'),
+        'result': final_state.get('result', {})
+    }
+    
+    # Validate output with Pydantic (but preserve result even if validation fails)
+    result_backup = output_data.get('result', {})
+    try:
+        validated_output = OutputData(**output_data)
+        output_data = validated_output.model_dump()
+        # Ensure result is preserved
+        if result_backup and not output_data.get('result'):
+            output_data['result'] = result_backup
+    except Exception as e:
+        logger.warning(f"Output validation warning: {e}")
+        # Continue with output_data even if validation fails
+        # Ensure result is preserved
+        if result_backup:
+            output_data['result'] = result_backup
+    
+    # Save output with timestamp
+    from config import get_output_config
+    output_config = get_output_config()
+    output_dir = project_root / output_config.get('directory', 'output')
+    
+    # Generate timestamp for filename
+    from datetime import datetime
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Get base filename and add timestamp before .json extension
+    base_filename = output_config.get('filename', 'pathogen_info_output.json')
+    if base_filename.endswith('.json'):
+        filename_with_timestamp = base_filename.replace('.json', f'_{timestamp}.json')
+    else:
+        filename_with_timestamp = f"{base_filename}_{timestamp}.json"
+    
+    output_path = output_dir / filename_with_timestamp
+    save_output(output_data, str(output_path))
+    
+    # Log result summary
+    result = output_data.get('result', {})
+    if result:
+        therapy_plan = result.get('antibiotic_therapy_plan', {})
+        first_count = len(therapy_plan.get('first_choice', []))
+        second_count = len(therapy_plan.get('second_choice', []))
+        alt_count = len(therapy_plan.get('alternative_antibiotic', []))
+        logger.info(f"Result: {first_count} first_choice, {second_count} second_choice, {alt_count} alternative antibiotics")
+    
+    logger.info(f"Extraction complete")
+    
+    # Optionally export to PDF
+    try:
+        from export_pdf import export_to_pdf
+        # Export PDF
+        pdf_path = export_to_pdf(output_data)
+        logger.info(f"PDF report exported to: {pdf_path}")
+    except ImportError as e:
+        logger.warning(f"PDF export not available: {e}")
+        logger.info("Install xhtml2pdf to enable PDF export: pip install xhtml2pdf")
+    except Exception as e:
+        logger.warning(f"Error exporting PDF: {e}")
+
+
+if __name__ == "__main__":
+    main()
+
