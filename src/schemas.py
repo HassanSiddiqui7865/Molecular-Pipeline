@@ -7,12 +7,13 @@ from pydantic import BaseModel, Field
 
 class AntibioticEntry(BaseModel):
     """Schema for a single antibiotic entry."""
-    medical_name: str = Field(..., description="Exact drug name as written in source. For combination therapies, use format 'Drug1 plus Drug2' (e.g., 'Ampicillin plus Ceftriaxone')")
+    medical_name: str = Field(..., description="Exact drug name as written in source. For combination therapies: ALWAYS normalize to 'Drug1 plus Drug2' format (e.g., 'Quinupristin-dalfopristin' → 'Quinupristin plus Dalfopristin', 'TMP/SMX' → 'Trimethoprim plus Sulfamethoxazole', 'Ampicillin and Gentamicin' → 'Ampicillin plus Gentamicin')")
     coverage_for: str = Field(..., description="Specific indication/condition it treats (e.g., 'VRE bacteremia', 'uncomplicated cystitis'). Be specific and concise.")
     route_of_administration: Optional[str] = Field(None, description="Route in standardized format: 'IV', 'PO', 'IM', 'IV/PO', 'IV or PO', 'Oral'. Extract from dose_duration if route is mentioned there but not separately. If not mentioned, use null (NOT 'Not specified').")
-    dose_duration: Optional[str] = Field(None, description="Dosing information in format: 'dose,route,frequency,duration'. Examples: '1000 mg,IV,q8h,10-14 days' or '15 mg/kg,IV,once daily,7 days' or '500 mg,PO,q12h,null'. For weight-based: '15 mg/kg,IV,once daily,7 days'. For fixed dose: '1000 mg,IV,q8h,10 days'. For combination therapies: '1000 mg (drug1),IV,q8h,10 days plus 600 mg (drug2),IV,q12h,10 days'. Use 'null' for missing components. Remove verbose phrases like 'during days +97-139', 'from first negative culture', 'high-dose', study details, averages, or case-specific information. If truly not mentioned, use null (NOT 'Not specified' or 'Not mentioned').")
+    dose_duration: Optional[str] = Field(None, description="Dosing in comma-separated format: 'dose,route,frequency,duration'. Single: '600 mg,PO,q12h,7 days'. Combinations: 'Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2' (pipe-separated with drug names). If both combined and individual mentioned: 'combined:dose,route,freq,dur|Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2'. Loading doses: use maintenance only. Use 'null' for missing components. If not mentioned, use null.")
     renal_adjustment: Optional[str] = Field(None, description="Renal adjustment information in format: 'Adjust dose in CrCl < X mL/min' or 'Dose adjust for renal dysfunction' or 'Avoid if CrCl < X mL/min'. Consider patient age if provided. If not mentioned, use null (NOT 'Not specified').")
     general_considerations: Optional[str] = Field(None, description="Clinical notes, warnings, monitoring requirements, contraindications. Be comprehensive but concise. If nothing mentioned, use null (NOT 'Not specified').")
+    is_combined: bool = Field(default=False, description="True if this is a combination therapy (multiple antibiotics used together - name contains hyphen, slash, 'plus', or explicit 'and/with'), False for single antibiotics.")
 
 
 class AntibioticTherapyPlan(BaseModel):
@@ -99,11 +100,12 @@ class OutputData(BaseModel):
 class RankedAntibioticEntry(BaseModel):
     """Schema for a ranked antibiotic entry."""
     medical_name: str
-    ranked_category: str = Field(..., description="Category after ranking: 'first_choice', 'second_choice', or 'alternative_antibiotic'")
-    ranking_reason: str = Field(..., description="Brief explanation (1-2 sentences) of why it's ranked in this category")
+    ranked_category: str = Field(..., description="Category: 'first_choice', 'second_choice', 'alternative_antibiotic', or 'remove' if not useful")
+    is_relevant: bool = Field(..., description="True if antibiotic is useful against the resistance gene and appropriate for patient condition, False otherwise")
+    ranking_reason: str = Field(..., description="Brief explanation of ranking decision")
 
 
 class RankedAntibioticsResult(BaseModel):
     """Schema for ranked antibiotics result."""
-    ranked_antibiotics: List[RankedAntibioticEntry] = Field(default_factory=list, description="List of ranked antibiotics with their new categories")
+    ranked_antibiotics: List[RankedAntibioticEntry] = Field(default_factory=list, description="List of all antibiotics with their rankings and relevance")
 

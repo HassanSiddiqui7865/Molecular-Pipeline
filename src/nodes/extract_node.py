@@ -18,81 +18,82 @@ from utils import format_resistance_genes, format_icd_codes
 logger = logging.getLogger(__name__)
 
 
-# Combined prompt for extracting both antibiotic therapy and resistance genes in one call
-COMBINED_EXTRACTION_PROMPT = """Extract antibiotic stewardship information from the medical literature source provided below.
+COMBINED_EXTRACTION_PROMPT = """Extract antibiotic information for {pathogen_name} with {resistant_gene} resistance.
 
-CONTEXT:
-- Pathogen: {pathogen_name}
-- Resistance Gene(s): {resistant_gene}
-- Pathogen Count: {pathogen_count}
-- ICD Code(s): {severity_codes}
-- Patient Age: {age}
+PATIENT CONTEXT:
+Pathogen: {pathogen_name} ({pathogen_count})
+Resistance: {resistant_gene}
+ICD Codes: {severity_codes}
+Age: {age}
 
-SOURCE CONTENT:
+SOURCE:
 {content}
 
 ---
 
-INSTRUCTIONS:
+RULES:
 
-Extract ONLY antibiotics explicitly mentioned as effective against {pathogen_name} with {resistant_gene} resistance. If multiple resistance genes are specified, extract antibiotics effective against any of these resistance mechanisms.
+1. SELECTION:
+   - Extract antibiotics explicitly effective against {pathogen_name} with {resistant_gene}
+   - Match severity to ICD codes: {severity_codes}
+   - Consolidate duplicates unless clinically distinct (different doses/indications)
 
-Consider the patient's ICD codes ({severity_codes}) when extracting antibiotics - prioritize antibiotics appropriate for these conditions and severity levels. 
+2. COMBINATIONS:
+   - Identify combinations from: "Drug1 and Drug2", "Drug1 with Drug2", "Drug1/Drug2", "Drug1-Drug2", hyphenated names (e.g., "Quinupristin-dalfopristin")
+   - Format: ALWAYS normalize to "Drug1 plus Drug2" format (lowercase "plus", title case drug names)
+   - Examples: "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole" | "Ampicillin and Gentamicin" → "Ampicillin plus Gentamicin"
+   - Set is_combined = True for ANY combination (hyphenated, slash, "plus", or explicit "and/with")
 
-IMPORTANT: For combination therapies (e.g., "Daptomycin plus Ceftaroline", "Ampicillin plus Ceftriaxone"):
-- ONLY extract if dose_duration is explicitly mentioned in the source
-- If a combination therapy is mentioned but dose_duration is NOT specified, do NOT extract it
-- Single antibiotics should always be extracted regardless of dose_duration availability
+3. CATEGORIES (only if explicitly stated):
+   - first_choice: "first-line", "preferred", "recommended", "primary"
+   - second_choice: "alternative", "second-line", "backup"
+   - alternative_antibiotic: "salvage", "last resort"
+   - not_known: Mentioned as effective but category not stated
 
-CATEGORIZATION:
-- first_choice: Place here if source explicitly states 'first-line', 'preferred', 'recommended', 'guideline recommends', 'primary', or lists it as the primary/preferred option
-- second_choice: Place here if source states 'alternative', 'second-line', 'if first-line unavailable', 'backup', or lists as secondary/backup option
-- alternative_antibiotic: Place here if source mentions as 'other option', 'salvage therapy', 'last resort', 'consider if', or lists without clear preference/priority
-- not_known: Place here ONLY when you are NOT confident about the category. Use this when the source mentions the antibiotic but does NOT clearly indicate its category (no explicit 'first-line', 'second-line', 'alternative', etc.). If you are uncertain or the category is ambiguous, use 'not_known'.
+4. FIELDS:
 
-FIELD REQUIREMENTS FOR EACH ANTIBIOTIC:
-- medical_name: GENERAL/NORMALIZED antibiotic name (NOT exact text from source). Extract the active ingredient name in normalized format:
-  * Use title case: First letter capital, rest lowercase (e.g., "Linezolid", "Vancomycin", "Daptomycin")
-  * Remove dosage information (e.g., "Linezolid 600mg" → "Linezolid", "Vancomycin 1g" → "Vancomycin")
-  * Remove brand names in parentheses (e.g., "Linezolid (Zyvox)" → "Linezolid", "Vancomycin (Vancocin)" → "Vancomycin")
-  * Remove route information from name (e.g., "Vancomycin IV" → "Vancomycin", "Linezolid PO" → "Linezolid")
-  * Use generic name, not brand name (e.g., "Zyvox" → "Linezolid", "Vancocin" → "Vancomycin")
-  * For combination therapies: Use format 'Drug1 plus Drug2' with normalized names (e.g., 'Daptomycin plus Ceftaroline')
-  * Handle salt forms: Use base drug name (e.g., "Nitrofurantoin dihydrate" → "Nitrofurantoin", "Ampicillin sodium" → "Ampicillin")
-  * Handle hyphens: Keep hyphenated names as-is (e.g., "Quinupristin-dalfopristin")
-  
-  PATTERN: Extract the core active ingredient name, normalized to title case, without dosage, brand names, routes, or salt forms.
-  
-  Examples:
-  - Source says "linezolid 600mg twice daily" → medical_name: "Linezolid"
-  - Source says "Zyvox (linezolid)" → medical_name: "Linezolid"
-  - Source says "vancomycin IV 1g q12h" → medical_name: "Vancomycin"
-  - Source says "daptomycin 10-12 mg/kg" → medical_name: "Daptomycin"
-  - Source says "Nitrofurantoin dihydrate 100mg" → medical_name: "Nitrofurantoin"
-  - Source says "quinupristin-dalfopristin" → medical_name: "Quinupristin-dalfopristin"
-  
-  REMEMBER: Only extract combinations if dose_duration is specified.
-- coverage_for: Specific indication/condition it treats (e.g., 'VRE bacteremia', 'uncomplicated cystitis'). Be specific and concise. This is the medical indication, NOT the category label (NOT 'first-line/preferred' or 'alternative/second-line')
-- route_of_administration: Route in standardized format: 'IV', 'PO', 'IM', 'IV/PO', 'IV or PO', 'Oral'. Extract from dose_duration if route is mentioned there but not separately. If not mentioned, use null (NOT 'Not specified')
-- dose_duration: Dosing information in format: 'dose,route,frequency,duration'. Examples: '1000 mg,IV,q8h,10-14 days' or '15 mg/kg,IV,once daily,7 days' or '500 mg,PO,q12h,null'. For weight-based: '15 mg/kg,IV,once daily,7 days'. For fixed dose: '1000 mg,IV,q8h,10 days'. For combination therapies: '1000 mg (drug1),IV,q8h,10 days plus 600 mg (drug2),IV,q12h,10 days'. Use 'null' for missing components. Remove verbose phrases like 'during days +97-139', 'from first negative culture', 'high-dose', study details, averages, or case-specific information. CRITICAL: For combination therapies, if dose_duration is not mentioned, do NOT extract that combination at all. For single antibiotics, if not mentioned, use null (NOT 'Not specified' or 'Not mentioned')
-- renal_adjustment: Renal adjustment information in format: 'Adjust dose in CrCl < X mL/min' or 'Dose adjust for renal dysfunction' or 'Avoid if CrCl < X mL/min'. Consider patient age if provided. If not mentioned, use null (NOT 'Not specified')
-- general_considerations: Clinical notes, warnings, monitoring requirements, contraindications. Be comprehensive but concise. If nothing mentioned, use null (NOT 'Not specified')
+   medical_name: Title case, no dosage/brand/route/salts. ALWAYS normalize combinations to "Drug1 plus Drug2" format.
+   Examples: "vancomycin 1g IV" → "Vancomycin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole" | "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin" | "Ampicillin and Gentamicin" → "Ampicillin plus Gentamicin"
 
-RESISTANCE GENE EXTRACTION:
-Extract information about the resistance mechanism(s) ({resistant_gene}). For each resistance gene mentioned in the source:
-- detected_resistant_gene_name: Standard name of the detected resistance gene (must match one of: {resistant_gene})
-- potential_medication_classes_affected: Medication classes affected by this resistance gene
-- general_considerations: Resistance mechanism, mechanism of action, clinical impact, and treatment implications. If nothing mentioned, use null
+   is_combined: True if therapies are combined (name contains "plus" after normalization), False otherwise
 
-If multiple resistance genes are specified in the context, extract information for each gene that is mentioned in the source.
+   coverage_for: Specific indication (e.g., "MRSA bacteremia")
 
-DO NOT extract:
-- Combination therapies where dose_duration is NOT specified (e.g., if "Daptomycin plus Ceftaroline" is mentioned but no dosing information is provided, do NOT extract it)
-- Antibiotics mentioned as ineffective, resistant, or not recommended
-- General drug classes without specific drug names (unless source explicitly recommends the class)
-- Experimental or investigational drugs unless source explicitly recommends them
-- Antibiotics mentioned only in context of resistance or failure"""
+   route_of_administration: "IV", "PO", "IM", "IV/PO", "Oral" (null if not mentioned)
 
+   dose_duration: Always comma-separated "dose,route,frequency,duration"
+   - Single: "600 mg,PO,q12h,7 days"
+   - Combinations: Include all mentioned dosages. Format: "Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2" (pipe-separated with drug names)
+   - If both combined and individual mentioned: "combined:dose,route,freq,dur|Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2"
+   - Loading doses: Use maintenance only (ignore loading, use regular dose)
+   - Components: dose (amount only), route (IV/PO/IM), frequency (q8h/q12h/BID/TID), duration (days/weeks)
+   - Missing: Use "null" for any missing component
+   - Examples: "600 mg,PO,q12h,7 days" | "Ampicillin:2g,IV,q4h,14 days|Gentamicin:1mg/kg,IV,q8h,14 days" | "null,null,null,null"
+
+   renal_adjustment: "Adjust dose for CrCl < X mL/min" or similar (null if not mentioned)
+
+   general_considerations: Synthesize clinical notes concisely (null if none)
+
+5. RESISTANCE GENES (for each from {resistant_gene}):
+   - detected_resistant_gene_name: Gene name (e.g., "mecA")
+   - potential_medication_class_affected: Affected classes
+   - general_considerations: Mechanism and impact (null if none)
+
+VALIDATION:
+- Each antibiotic in ONE category only
+- medical_name: ALWAYS normalize combinations to "Drug1 plus Drug2" format (never keep hyphen/slash format)
+- is_combined = True if name contains "plus" (after normalization) or original had: hyphen (-), slash (/), "plus", or explicit "and/with"
+- NEVER extract genes (mecA, vanA) as antibiotics
+- dose_duration: Always comma-separated, include all mentioned dosages for combinations
+- Loading doses: Use maintenance only
+- No verbatim copying - synthesize intelligently
+
+EXCLUDE:
+- Genes as antibiotics
+- Ineffective/resistant antibiotics
+- Drug classes without specific names
+- Experimental drugs (unless recommended)
+- Antibiotics in resistance/failure context only"""
 
 class CombinedExtractionResult(BaseModel):
     """Combined schema for antibiotic therapy and resistance gene extraction."""
