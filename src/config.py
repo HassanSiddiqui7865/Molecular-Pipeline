@@ -139,6 +139,7 @@ def get_database_config() -> Dict[str, Any]:
         'ssh_username': os.getenv('DB_SSH_USERNAME', ''),
         'ssh_password': os.getenv('DB_SSH_PASSWORD', ''),
         'ssh_key_path': os.getenv('DB_SSH_KEY_PATH', ''),  # Path to SSH private key file (optional, alternative to password)
+        'ssh_key_passphrase': os.getenv('DB_SSH_KEY_PASSPHRASE', ''),  # Passphrase for SSH key (if key is encrypted)
         
         # Database Configuration (after SSH tunnel)
         'db_type': 'postgresql',  # Only PostgreSQL is supported

@@ -62,17 +62,6 @@ def load_extract_output(file_path: str) -> Dict[str, Any]:
         raise
 
 
-def save_extraction_result(data: Dict[str, Any], output_path: str):
-    """Save extract_node output to JSON file."""
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    
-    logger.info(f"Extraction result saved to: {output_path}")
-
-
 def save_synthesize_output(data: Dict[str, Any], output_path: str):
     """Save synthesize_node output to JSON file."""
     output_dir = Path(output_path).parent
@@ -96,17 +85,8 @@ def test_synthesize_node(extract_output_file: str, output_file: str = None):
     logger.info("Testing synthesize_node")
     logger.info("=" * 60)
     
-    # Load extract_node output
+    # Load rank_node output
     extract_data = load_extract_output(extract_output_file)
-    
-    # Save extract_node output to extraction_result.json
-    output_dir = project_root / "output"
-    extraction_result_file = output_dir / "extraction_result.json"
-    extraction_result_data = {
-        'input_parameters': extract_data['input_parameters'],
-        'source_results': extract_data['source_results']
-    }
-    save_extraction_result(extraction_result_data, str(extraction_result_file))
     
     # Create state dictionary for synthesize_node
     state = {
@@ -137,8 +117,8 @@ def test_synthesize_node(extract_output_file: str, output_file: str = None):
     try:
         result = synthesize_node(state)
         
-        # Extract unified_result
-        unified_result = result.get('unified_result', {})
+        # Extract result
+        unified_result = result.get('result', {})
         
         if unified_result:
             therapy_plan = unified_result.get('antibiotic_therapy_plan', {})
@@ -155,33 +135,30 @@ def test_synthesize_node(extract_output_file: str, output_file: str = None):
             logger.info(f"  - Second choice antibiotics: {len(second_choice)}")
             logger.info(f"  - Alternative antibiotics: {len(alternative)}")
             logger.info(f"  - Resistance genes: {len(resistance_genes)}")
-            logger.info(f"  - Overall confidence: {overall_confidence:.2f}")
-            logger.info(f"  - Total sources analyzed: {unified_result.get('total_sources_analyzed', 0)}")
-            
             # Show first few antibiotics from each category
             if first_choice:
                 logger.info("\n  First Choice Antibiotics:")
                 for ab in first_choice[:3]:
-                    logger.info(f"    - {ab.get('medical_name', 'N/A')} (consensus: {ab.get('consensus_count', 0)})")
+                    logger.info(f"    - {ab.get('medical_name', 'N/A')}")
             
             if second_choice:
                 logger.info("\n  Second Choice Antibiotics:")
                 for ab in second_choice[:3]:
-                    logger.info(f"    - {ab.get('medical_name', 'N/A')} (consensus: {ab.get('consensus_count', 0)})")
+                    logger.info(f"    - {ab.get('medical_name', 'N/A')}")
             
             if alternative:
                 logger.info("\n  Alternative Antibiotics:")
                 for ab in alternative[:3]:
-                    logger.info(f"    - {ab.get('medical_name', 'N/A')} (consensus: {ab.get('consensus_count', 0)})")
+                    logger.info(f"    - {ab.get('medical_name', 'N/A')}")
         else:
-            logger.warning("No unified_result returned from synthesize_node")
+            logger.warning("No result returned from synthesize_node")
         
         # Save output if output_file is specified
         if output_file:
             output_data = {
                 'input_parameters': state['input_parameters'],
                 'source_results': state['source_results'],
-                'unified_result': unified_result
+                'result': unified_result
             }
             save_synthesize_output(output_data, output_file)
         else:
@@ -191,7 +168,7 @@ def test_synthesize_node(extract_output_file: str, output_file: str = None):
             output_data = {
                 'input_parameters': state['input_parameters'],
                 'source_results': state['source_results'],
-                'unified_result': unified_result
+                'result': unified_result
             }
             save_synthesize_output(output_data, str(output_file))
         
@@ -212,13 +189,13 @@ def main():
     if len(sys.argv) > 1:
         extract_output_file = sys.argv[1]
     else:
-        # First check for extraction_result.json (saved by extract_node)
+        # First check for test_rank_output.json (saved by rank_node)
         output_dir = project_root / "output"
-        extraction_result_file = output_dir / "extraction_result.json"
+        rank_output_file = output_dir / "test_rank_output.json"
         
-        if extraction_result_file.exists():
-            extract_output_file = extraction_result_file
-            logger.info(f"Using extraction_result.json: {extract_output_file}")
+        if rank_output_file.exists():
+            extract_output_file = rank_output_file
+            logger.info(f"Using test_rank_output.json: {extract_output_file}")
         else:
             # Fall back to finding the most recent output file
             output_files = list(output_dir.glob("pathogen_info_output_*.json"))
@@ -227,8 +204,8 @@ def main():
                 extract_output_file = max(output_files, key=lambda p: p.stat().st_mtime)
                 logger.info(f"Using most recent output file: {extract_output_file}")
             else:
-                logger.error("No output files found. Please provide a path to an extract_node output file.")
-                logger.error("Usage: python test_synthesize.py [path_to_extract_output.json] [output_file.json]")
+                logger.error("No output files found. Please provide a path to a rank_node output file.")
+                logger.error("Usage: python test_synthesize.py [path_to_rank_output.json] [output_file.json]")
                 sys.exit(1)
     
     # Optional output file

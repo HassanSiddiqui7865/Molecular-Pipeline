@@ -1,26 +1,24 @@
 """
 Enrichment node for LangGraph - Enriches missing dosage information from drugs.com using Selenium.
+Uses LangGraph memory store to store previous chunk context to avoid randomness.
+Only processes entries where is_complete is False.
 """
 import logging
+import re
 from typing import Dict, Any, Optional, List, Tuple
-from urllib.parse import quote_plus, unquote
+from urllib.parse import quote_plus
 import time
 import random
 from bs4 import BeautifulSoup
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import format_resistance_genes
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.store.memory import InMemoryStore
+from langgraph.store.base import BaseStore
+
+from utils import format_resistance_genes, get_icd_names_from_state
 
 logger = logging.getLogger(__name__)
-
-try:
-    import dspy
-    from dspy import Signature, InputField, OutputField, Module
-    DSPY_AVAILABLE = True
-except ImportError:
-    DSPY_AVAILABLE = False
-    logger.warning("DSPy not available. Install with: pip install dspy-ai")
 
 try:
     from selenium import webdriver
@@ -52,7 +50,6 @@ def _get_selenium_driver() -> Optional[Any]:
     
     try:
         chrome_options = Options()
-        # Run in visible mode (headless = False)
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
@@ -63,7 +60,6 @@ def _get_selenium_driver() -> Optional[Any]:
         
         driver = webdriver.Chrome(options=chrome_options)
         
-        # Execute script to hide webdriver property
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
                 Object.defineProperty(navigator, 'webdriver', {
@@ -80,11 +76,7 @@ def _get_selenium_driver() -> Optional[Any]:
 
 def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Optional[str]:
     """
-    Search DuckDuckGo using Selenium by mimicking human behavior:
-    1. Go to DuckDuckGo homepage
-    2. Type query in search bar
-    3. Click search button
-    4. Extract first drugs.com URL with 'dosage' in it.
+    Search DuckDuckGo using Selenium to find drugs.com dosage URL.
     
     Args:
         antibiotic_name: Name of the antibiotic
@@ -98,68 +90,49 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
     
     try:
         search_query = f"{antibiotic_name} dosage drug.com"
-        
         logger.info(f"Searching DuckDuckGo for {antibiotic_name}...")
         
-        # Step 1: Go to DuckDuckGo homepage
         driver.get("https://duckduckgo.com/")
-        # Random wait to mimic human reading the page
         time.sleep(random.uniform(1.5, 3.0))
         
-        # Step 2: Find search box and type query
         try:
-            # DuckDuckGo search box selector
             search_box = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.ID, "searchbox_input"))
             )
             
             if not search_box:
-                # Fallback selector
                 search_box = driver.find_element(By.CSS_SELECTOR, "input[name='q']")
             
-            # Scroll to search box (human-like behavior)
             driver.execute_script("arguments[0].scrollIntoView(true);", search_box)
             time.sleep(random.uniform(0.3, 0.7))
             
-            # Click on search box first (human-like)
             search_box.click()
             time.sleep(random.uniform(0.2, 0.5))
             
-            # Type query character by character (human-like with variable speed)
             search_box.clear()
             for char in search_query:
                 search_box.send_keys(char)
-                # Random delay between keystrokes (0.05-0.15 seconds)
                 time.sleep(random.uniform(0.05, 0.15))
             
-            # Random pause before clicking (like human thinking)
             time.sleep(random.uniform(0.5, 1.2))
-            
-            # Step 3: Press Enter to search (DuckDuckGo doesn't always have a visible button)
             search_box.send_keys(Keys.RETURN)
-            
-            # Step 4: Wait for search results to load (with random delay)
-            time.sleep(random.uniform(2.5, 4.0))  # Random wait for results
+            time.sleep(random.uniform(2.5, 4.0))
             
         except Exception as e:
             logger.warning(f"Error during search interaction: {e}, trying direct URL as fallback")
-            # Fallback to direct URL if interaction fails
             encoded_query = quote_plus(search_query)
             duckduckgo_url = f"https://duckduckgo.com/?q={encoded_query}"
             driver.get(duckduckgo_url)
             time.sleep(2)
         
-        # Step 5: Find all search result links from DuckDuckGo results
         try:
-            # Wait for search results to appear
-            time.sleep(3)  # Give more time for results to load
+            time.sleep(3)
             
-            # DuckDuckGo result links - try multiple selectors
             result_selectors = [
-                "a[data-testid='result-title-a']",  # Modern DuckDuckGo
-                "a.result__a",  # Classic DuckDuckGo
-                ".result a",  # Any link in result container
-                "article a",  # Links in article elements
+                "a[data-testid='result-title-a']",
+                "a.result__a",
+                ".result a",
+                "article a",
             ]
             
             found_urls = []
@@ -167,7 +140,6 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
             for selector in result_selectors:
                 try:
                     result_links = driver.find_elements(By.CSS_SELECTOR, selector)
-                    logger.debug(f"Found {len(result_links)} links with selector {selector}")
                     
                     for link in result_links:
                         try:
@@ -175,33 +147,26 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
                             if not href:
                                 continue
                             
-                            # Skip DuckDuckGo's own URLs, search URLs, and internal links
                             href_lower = href.lower()
                             if ('duckduckgo.com' in href_lower or 
                                 href.startswith('javascript:') or 
                                 href.startswith('#') or
-                                '?q=' in href_lower or  # Skip search query URLs
-                                '/?q=' in href_lower):  # Skip search query URLs
+                                '?q=' in href_lower or
+                                '/?q=' in href_lower):
                                 continue
                             
-                            # Check if it's a drugs.com URL (must be in the domain, not query string)
-                            # The URL must start with http and contain drugs.com as the domain
                             if (href.startswith('http') and 
                                 'drugs.com' in href_lower and 
                                 'dosage' in href_lower):
                                 
-                                # Extract domain to verify it's actually drugs.com
                                 try:
                                     from urllib.parse import urlparse
                                     parsed = urlparse(href)
                                     domain = parsed.netloc.lower()
                                     
-                                    # Must be drugs.com domain (not in query string)
                                     if 'drugs.com' in domain and 'dosage' in href_lower:
-                                        # Clean the URL - remove any query parameters that might be added
                                         url = href.split('?')[0] if '?' in href else href
                                         
-                                        # Final verification
                                         if ('drugs.com' in url.lower() and 
                                             'dosage' in url.lower() and 
                                             'duckduckgo' not in url.lower() and
@@ -220,7 +185,6 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
                     logger.debug(f"Selector {selector} failed: {e}")
                     continue
             
-            # If we found URLs but none matched, log them for debugging
             if found_urls:
                 logger.warning(f"Found {len(found_urls)} drugs.com URLs but none matched criteria: {found_urls[:3]}")
             else:
@@ -237,9 +201,84 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         return None
 
 
+def _validate_antibiotic_match(
+    url: str,
+    antibiotic_name: str,
+    driver: Any,
+    llm: BaseChatModel
+) -> bool:
+    """
+    Validate that the drugs.com page is for the same antibiotic we're searching for.
+    Uses LLM to verify medical match based on page title.
+    
+    Args:
+        url: URL of the drugs.com page
+        antibiotic_name: Name of the antibiotic we're searching for
+        driver: Selenium WebDriver instance
+        llm: LangChain BaseChatModel for validation
+        
+    Returns:
+        True if the page matches the antibiotic, False otherwise
+    """
+    if not driver or not llm:
+        return False
+    
+    try:
+        logger.info(f"Validating antibiotic match for {antibiotic_name} at {url}...")
+        
+        # Navigate to page and get title
+        driver.get(url)
+        time.sleep(random.uniform(1.5, 2.5))
+        
+        # Get page title
+        page_title = driver.title if driver.title else ""
+        
+        if not page_title:
+            logger.warning(f"No page title found for {url}, skipping validation")
+            return True  # Fail open if no title
+        
+        # Use LLM to validate match based on title only
+        from pydantic import BaseModel, Field
+        
+        class AntibioticMatchResult(BaseModel):
+            """Schema for antibiotic match validation."""
+            is_match: bool = Field(..., description="True if the page title indicates this is about the same antibiotic we're searching for, False otherwise")
+            reason: str = Field(..., description="Brief explanation of why it matches or doesn't match")
+        
+        structured_llm = llm.with_structured_output(AntibioticMatchResult)
+        
+        prompt = f"""Is this drugs.com page about the same drug we're searching for?
+
+SEARCHING FOR: {antibiotic_name}
+PAGE TITLE: {page_title}
+
+Question: Is this medically the same drug or not?
+
+Answer: Return is_match=True only if the page title indicates this is the same drug (same active ingredient/medically equivalent). Return is_match=False if it's a different drug."""
+        
+        result = structured_llm.invoke(prompt)
+        
+        is_match = result.is_match
+        reason = result.reason
+        
+        logger.info(f"Validation result for {antibiotic_name}: is_match={is_match}, reason={reason}")
+        
+        if is_match:
+            logger.info(f"✓ Validated match for {antibiotic_name} (title: {page_title})")
+            return True
+        else:
+            logger.warning(f"✗ No match for {antibiotic_name} (title: {page_title}): {reason}")
+            return False
+        
+    except Exception as e:
+        logger.warning(f"Error validating antibiotic match for {antibiotic_name}: {e}")
+        # On error, allow it (fail open) but log warning
+        return True
+
+
 def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
     """
-    Scrape content from drugs.com page using Selenium, extracting only from #content element.
+    Scrape content from drugs.com page using Selenium.
     
     Args:
         url: URL of the drugs.com page
@@ -254,20 +293,15 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
     try:
         logger.info(f"Navigating directly to {url}...")
         driver.get(url)
-        
-        # Wait for page to load
         time.sleep(random.uniform(2.0, 3.5))
         
-        # Find and extract content from #content element
         try:
             content_element = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "content"))
             )
             
-            # Get text content from the #content element
             text = content_element.text
             
-            # Clean up whitespace
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
@@ -277,11 +311,9 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
             
         except Exception as e:
             logger.warning(f"Could not find #content element, trying fallback: {e}")
-            # Fallback: get all page content if #content not found
             page_source = driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
         
-        # Remove script and style elements
         for script in soup(["script", "style"]):
             script.decompose()
         
@@ -320,18 +352,16 @@ def _chunk_text(text: str, chunk_size: int = 6000, overlap: int = 500) -> List[s
         end = start + chunk_size
         chunk = text[start:end]
         
-        # Try to break at sentence boundary if possible
         if end < len(text):
-            # Look for sentence endings near the end
             for punct in ['. ', '.\n', '! ', '!\n', '? ', '?\n']:
                 last_punct = chunk.rfind(punct)
-                if last_punct > chunk_size * 0.7:  # If found in last 30% of chunk
+                if last_punct > chunk_size * 0.7:
                     chunk = chunk[:last_punct + 1]
                     end = start + len(chunk)
                     break
         
         chunks.append(chunk)
-        start = end - overlap  # Overlap to maintain context
+        start = end - overlap
         
         if start >= len(text):
             break
@@ -339,269 +369,193 @@ def _chunk_text(text: str, chunk_size: int = 6000, overlap: int = 500) -> List[s
     return chunks
 
 
-# Configure DSPy once at module level to avoid thread-local issues
-_dspy_configured = False
-_dspy_lm = None
-
-def _configure_dspy_once():
-    """Configure DSPy once, thread-safe."""
-    global _dspy_configured, _dspy_lm
-    if not _dspy_configured and DSPY_AVAILABLE:
-        try:
-            from config import get_ollama_config
-            ollama_config = get_ollama_config()
-            
-            # Get model name and base URL from config
-            model = ollama_config['model'].replace('ollama/', '')
-            api_base = ollama_config['api_base']
-            
-            # Configure DSPy to use Ollama directly via dspy.LM
-            _dspy_lm = dspy.LM(f'ollama/{model}', api_base=api_base)
-            dspy.configure(lm=_dspy_lm)
-            _dspy_configured = True
-            logger.debug("DSPy configured successfully")
-        except Exception as e:
-            logger.warning(f"Failed to configure DSPy: {e}")
-
-
-# Configure DSPy once in main thread (DSPy is not thread-safe)
-_dspy_configured = False
-
-def _configure_dspy():
-    """Configure DSPy once in the main thread."""
-    global _dspy_configured
-    if _dspy_configured:
-        return
-    
-    if not DSPY_AVAILABLE:
-        logger.warning("DSPy not available")
-        return
-    
-    try:
-        from config import get_ollama_config
-        ollama_config = get_ollama_config()
-        
-        # Get model name and base URL from config
-        model = ollama_config['model'].replace('ollama/', '')
-        api_base = ollama_config['api_base']
-        
-        # Configure DSPy to use Ollama directly via dspy.LM
-        lm = dspy.LM(f'ollama/{model}', api_base=api_base)
-        dspy.configure(lm=lm)
-        _dspy_configured = True
-        logger.debug("DSPy configured successfully")
-    except Exception as e:
-        logger.warning(f"Failed to configure DSPy: {e}")
-
-
-def _extract_fields_with_dspy(
-    page_content: str,
-    medical_name: str,
-    missing_fields: List[str],
-    age: Optional[int] = None,
-    icd_code_names: Optional[str] = None,
-    resistance_gene: Optional[str] = None
-) -> Dict[str, Optional[str]]:
+def _get_or_create_store(state: Dict[str, Any]) -> BaseStore:
     """
-    Use DSPy to extract missing fields from drugs.com page content.
-    Handles large pages by chunking the content and processing chunks.
+    Get or create LangGraph memory store from state.
     
     Args:
-        page_content: Extracted content from drugs.com page
-        medical_name: Name of the antibiotic
-        missing_fields: List of field names that are missing (e.g., ['dose_duration', 'route_of_administration'])
-        age: Patient age (optional)
-        icd_code_names: Transformed ICD code names (comma-separated, optional)
-        resistance_gene: Resistance gene name (optional)
+        state: Pipeline state dictionary
         
     Returns:
-        Dictionary with extracted field values
+        BaseStore instance
     """
-    if not DSPY_AVAILABLE:
-        logger.warning("DSPy not available, cannot extract fields")
-        return {}
+    # Ensure metadata exists
+    if 'metadata' not in state:
+        state['metadata'] = {}
     
+    metadata = state['metadata']
+    
+    # Check if store already exists in metadata
+    if 'enrichment_store' in metadata:
+        store = metadata['enrichment_store']
+        if store is not None:
+            return store
+    
+    # Create new store if it doesn't exist
+    # For production, use a persistent store; for now, use InMemoryStore
     try:
-        # Ensure DSPy is configured (only in main thread)
-        _configure_dspy()
+        # Simple embedding function for semantic search (optional)
+        def embed(texts: list[str]) -> list[list[float]]:
+            # Return dummy embeddings for now (can be enhanced with actual embeddings)
+            return [[0.0] * 128 for _ in texts]
         
-        if not _dspy_configured:
-            logger.warning("DSPy configuration failed, cannot extract fields")
-            return {}
+        store = InMemoryStore(index={"embed": embed, "dims": 128})
+        metadata['enrichment_store'] = store
+        logger.info("Created new enrichment memory store")
+        return store
+    except Exception as e:
+        logger.warning(f"Error creating store with index, using basic store: {e}")
+        store = InMemoryStore()
+        metadata['enrichment_store'] = store
+        return store
+
+
+def _store_chunk_context(
+    store: BaseStore,
+    medical_name: str,
+    chunk_index: int,
+    chunk_content: str,
+    extracted_fields: Dict[str, Any]
+):
+    """
+    Store chunk context in memory store.
+    
+    Args:
+        store: LangGraph store instance
+        medical_name: Name of the antibiotic
+        chunk_index: Index of the chunk
+        chunk_content: Content of the chunk
+        extracted_fields: Fields extracted from this chunk
+    """
+    try:
+        namespace = ("enrichment", "chunks", medical_name)
+        key = f"chunk_{chunk_index}"
         
-        # Define extraction signature
-        class ExtractDosageInfo(dspy.Signature):
-            """Extract dosage information from drugs.com page content for an antibiotic."""
-            
-            page_content: str = dspy.InputField(desc="Content from drugs.com dosage page")
-            antibiotic_name: str = dspy.InputField(desc="Name of the antibiotic")
-            patient_age: str = dspy.InputField(desc="Patient age or 'adult'")
-            icd_code_names: str = dspy.InputField(desc="ICD code names (disease conditions) or 'none'")
-            resistance_gene: str = dspy.InputField(desc="Resistance gene name or 'none'")
-            missing_fields: str = dspy.InputField(desc="Comma-separated list of fields to extract")
-            
-            dose_duration: str = dspy.OutputField(desc="Dosing information in format 'dose,route,frequency,duration' or null if not found")
-            route_of_administration: str = dspy.OutputField(desc="Route of administration: 'IV', 'PO', 'IM', 'IV/PO', or null")
-            general_considerations: str = dspy.OutputField(desc="Concise clinical notes/considerations in plain text (max 200 chars) or null if not found. Extract only key points like monitoring requirements, contraindications, special precautions - be brief and factual. Use plain text, not bullet points.")
-            coverage_for: str = dspy.OutputField(desc="What conditions/infections this antibiotic covers or null if not found")
-            renal_adjustment: str = dspy.OutputField(desc="Renal adjustment/dosing guidelines or null if not found")
-        
-        # Create DSPy module
-        extractor = dspy.ChainOfThought(ExtractDosageInfo)
-        
-        # Prepare input
-        patient_age_str = f"{age} years" if age else "adult"
-        missing_fields_str = ", ".join(missing_fields)
-        icd_code_names_str = icd_code_names if icd_code_names else "none"
-        resistance_gene_str = resistance_gene if resistance_gene else "none"
-        
-        # Chunk the content if it's too large
-        chunk_size = 6000  # Characters per chunk
-        chunks = _chunk_text(page_content, chunk_size=chunk_size, overlap=500)
-        
-        logger.info(f"[DSPy] Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
-        
-        # Process each chunk and accumulate results
-        all_results = {
-            'dose_duration': [],
-            'route_of_administration': [],
-            'general_considerations': [],
-            'coverage_for': [],
-            'renal_adjustment': []
+        value = {
+            "chunk_content": chunk_content[:1000],  # Store first 1000 chars for context
+            "extracted_fields": extracted_fields,
+            "chunk_index": chunk_index
         }
         
-        for i, chunk in enumerate(chunks):
-            try:
-                logger.debug(f"[DSPy] Processing chunk {i+1}/{len(chunks)} for {medical_name}")
-                
-                # Extract fields from this chunk
-                result = extractor(
-                    page_content=chunk,
-                    antibiotic_name=medical_name,
-                    patient_age=patient_age_str,
-                    icd_code_names=icd_code_names_str,
-                    resistance_gene=resistance_gene_str,
-                    missing_fields=missing_fields_str
-                )
-                
-                # Collect non-null results
-                if hasattr(result, 'dose_duration') and result.dose_duration and result.dose_duration.lower() not in ['null', 'none', 'not found', '']:
-                    all_results['dose_duration'].append(result.dose_duration)
-                if hasattr(result, 'route_of_administration') and result.route_of_administration and result.route_of_administration.lower() not in ['null', 'none', 'not found', '']:
-                    all_results['route_of_administration'].append(result.route_of_administration)
-                if hasattr(result, 'general_considerations') and result.general_considerations and result.general_considerations.lower() not in ['null', 'none', 'not found', '']:
-                    all_results['general_considerations'].append(result.general_considerations)
-                if hasattr(result, 'coverage_for') and result.coverage_for and result.coverage_for.lower() not in ['null', 'none', 'not found', '']:
-                    all_results['coverage_for'].append(result.coverage_for)
-                if hasattr(result, 'renal_adjustment') and result.renal_adjustment and result.renal_adjustment.lower() not in ['null', 'none', 'not found', '']:
-                    all_results['renal_adjustment'].append(result.renal_adjustment)
-                    
-            except Exception as e:
-                logger.warning(f"[DSPy] Error processing chunk {i+1} for {medical_name}: {e}")
-                continue
-        
-        # Merge results: use first non-null value found, or combine if multiple found
-        extracted = {}
-        
-        if 'dose_duration' in missing_fields:
-            if all_results['dose_duration']:
-                extracted['dose_duration'] = all_results['dose_duration'][0]
-            else:
-                extracted['dose_duration'] = None
-        
-        if 'route_of_administration' in missing_fields:
-            if all_results['route_of_administration']:
-                extracted['route_of_administration'] = all_results['route_of_administration'][0]
-            else:
-                extracted['route_of_administration'] = None
-        
-        if 'general_considerations' in missing_fields:
-            if all_results['general_considerations']:
-                considerations = all_results['general_considerations']
-                considerations.sort(key=len)
-                if len(considerations) == 1:
-                    extracted['general_considerations'] = considerations[0]
-                else:
-                    combined = " ".join(considerations[:2])
-                    if len(combined) > 300:
-                        extracted['general_considerations'] = considerations[0]
-                    else:
-                        extracted['general_considerations'] = combined
-            else:
-                extracted['general_considerations'] = None
-        
-        if 'coverage_for' in missing_fields:
-            if all_results['coverage_for']:
-                extracted['coverage_for'] = all_results['coverage_for'][0]
-            else:
-                extracted['coverage_for'] = None
-        
-        if 'renal_adjustment' in missing_fields:
-            if all_results['renal_adjustment']:
-                extracted['renal_adjustment'] = all_results['renal_adjustment'][0]
-            else:
-                extracted['renal_adjustment'] = None
-        
-        logger.info(f"[DSPy] Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v]}")
-        return extracted
-        
+        store.put(namespace, key, value)
+        logger.debug(f"Stored chunk context for {medical_name}, chunk {chunk_index}")
     except Exception as e:
-        logger.error(f"Error extracting fields with DSPy for {medical_name}: {e}")
-        # Fallback to LangChain if DSPy fails
-        try:
-            from config import get_ollama_llm
-            llm = get_ollama_llm()
-            return _extract_fields_with_langchain(page_content, medical_name, missing_fields, age, llm, icd_code_names, resistance_gene)
-        except:
-            return {}
+        logger.warning(f"Error storing chunk context: {e}")
 
 
-def _extract_fields_with_langchain(
+def _get_previous_chunk_contexts(
+    store: BaseStore,
+    medical_name: str
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve previous chunk contexts from memory store.
+    
+    Args:
+        store: LangGraph store instance
+        medical_name: Name of the antibiotic
+        
+    Returns:
+        List of previous chunk contexts
+    """
+    try:
+        namespace = ("enrichment", "chunks", medical_name)
+        items = store.search(namespace)
+        
+        contexts = []
+        for item in items:
+            if item.value:
+                contexts.append(item.value)
+        
+        # Sort by chunk_index
+        contexts.sort(key=lambda x: x.get("chunk_index", 0))
+        return contexts
+    except Exception as e:
+        logger.warning(f"Error retrieving chunk contexts: {e}")
+        return []
+
+
+def _extract_fields_with_langchain_memory(
     page_content: str,
     medical_name: str,
     missing_fields: List[str],
+    existing_data: Dict[str, Any],
     age: Optional[int],
-    llm: Any,
+    llm: BaseChatModel,
+    store: BaseStore,
     icd_code_names: Optional[str] = None,
     resistance_gene: Optional[str] = None
 ) -> Dict[str, Optional[str]]:
     """
-    Fallback: Use LangChain structured output to extract fields.
-    Handles large pages by chunking the content.
+    Use LangChain structured output to extract fields, using memory to store/retrieve chunk contexts.
+    Blends extracted fields with existing data to avoid randomness.
     
     Args:
         page_content: Extracted content from drugs.com page
         medical_name: Name of the antibiotic
         missing_fields: List of field names that are missing
+        existing_data: Existing data for this antibiotic (to blend with)
         age: Patient age (optional)
         llm: LangChain BaseChatModel
+        store: LangGraph store for memory
         icd_code_names: Transformed ICD code names (comma-separated, optional)
         resistance_gene: Resistance gene name (optional)
         
     Returns:
-        Dictionary with extracted field values
+        Dictionary with extracted field values (blended with existing data)
     """
     try:
         from pydantic import BaseModel, Field
         
         class DosageExtractionResult(BaseModel):
             """Schema for extracted dosage information."""
-            dose_duration: Optional[str] = Field(None, description="Dosing information in format 'dose,route,frequency,duration'")
-            route_of_administration: Optional[str] = Field(None, description="Route: 'IV', 'PO', 'IM', 'IV/PO', or null")
-            general_considerations: Optional[str] = Field(None, description="Concise clinical notes/considerations in plain text (max 200 chars). Extract only key points like monitoring requirements, contraindications, special precautions - be brief and factual. Use plain text, not bullet points.")
-            coverage_for: Optional[str] = Field(None, description="What conditions/infections this antibiotic covers")
-            renal_adjustment: Optional[str] = Field(None, description="Renal adjustment/dosing guidelines")
+            dose_duration: Optional[str] = Field(None, description="Dosing information in format 'dose,route,frequency,duration'. MUST match the specific ICD code conditions and consider resistance gene and patient age. Frequency MUST include 'q' prefix (q8h, q12h, q24h). DO NOT include loading doses. DO NOT create duplicates - choose ONE most appropriate dosage. If truly different dosages for different conditions (both in ICD codes), use pipe separator. Examples: '600 mg,IV,q12h,14 days' or '500 mg,PO,q8h,7 days|600 mg,IV,q12h,14 days'. Use existing value if already present, otherwise extract from content.")
+            route_of_administration: Optional[str] = Field(None, description="Route of administration. Must be one of: 'IV', 'PO', 'IM', 'IV/PO'. Examples: 'IV', 'PO', 'IV/PO'. Use existing value if already present, otherwise extract from content.")
+            general_considerations: Optional[str] = Field(None, description="Clinical notes and considerations. If dose_duration contains multiple dosages (separated by |), mention which condition from ICD codes each dosage is for. Examples: 'Monitor renal function, risk of nephrotoxicity' or 'For bacteremia: 600 mg IV q12h. For pneumonia: 500 mg PO q8h. Monitor renal function.'. Use existing value if already present, otherwise extract from content.")
+            coverage_for: Optional[str] = Field(None, description="Conditions or infections this antibiotic covers. Should align with the ICD code conditions provided. Examples: 'MRSA bacteremia, MRSA endocarditis' or 'Sepsis due to Staphylococcus aureus, Community-acquired pneumonia'. Use existing value if already present, otherwise extract from content.")
+            renal_adjustment: Optional[str] = Field(None, description="Renal adjustment or dosing guidelines for patients with renal impairment. Be concise and factual - NO repetition, NO references, NO citations. Extract only essential adjustment information. Examples: 'Adjust dose in CrCl < 30 mL/min' or 'No adjustment needed' or 'Reduce dose by 50% in CrCl < 30 mL/min'. Use existing value if already present, otherwise extract from content.")
         
         patient_age_str = f"{age} years" if age else "adult"
         missing_fields_str = ", ".join(missing_fields)
         icd_code_names_str = icd_code_names if icd_code_names else "none"
         resistance_gene_str = resistance_gene if resistance_gene else "none"
         
+        # Get previous chunk contexts from memory
+        previous_contexts = _get_previous_chunk_contexts(store, medical_name)
+        
+        # Build context summary from previous chunks
+        previous_context_summary = ""
+        if previous_contexts:
+            previous_context_summary = "\n\nPREVIOUS CHUNK CONTEXTS (for consistency):\n"
+            for ctx in previous_contexts[-3:]:  # Last 3 chunks
+                prev_fields = ctx.get("extracted_fields", {})
+                if prev_fields:
+                    prev_summary = ", ".join([f"{k}={v}" for k, v in prev_fields.items() if v])
+                    if prev_summary:
+                        previous_context_summary += f"- {prev_summary}\n"
+        
+        # Build existing data context
+        existing_data_context = ""
+        if existing_data:
+            existing_fields = []
+            if existing_data.get('dose_duration'):
+                existing_fields.append(f"dose_duration={existing_data['dose_duration']}")
+            if existing_data.get('route_of_administration'):
+                existing_fields.append(f"route_of_administration={existing_data['route_of_administration']}")
+            if existing_data.get('coverage_for'):
+                existing_fields.append(f"coverage_for={existing_data['coverage_for']}")
+            if existing_data.get('renal_adjustment'):
+                existing_fields.append(f"renal_adjustment={existing_data['renal_adjustment']}")
+            if existing_data.get('general_considerations'):
+                existing_fields.append(f"general_considerations={existing_data['general_considerations'][:100]}")
+            
+            if existing_fields:
+                existing_data_context = f"\n\nEXISTING DATA (preserve and blend with):\n" + "\n".join(existing_fields)
+        
         # Chunk the content if it's too large
-        chunk_size = 6000  # Characters per chunk
+        chunk_size = 6000
         chunks = _chunk_text(page_content, chunk_size=chunk_size, overlap=500)
         
-        logger.info(f"[LangChain] Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
+        logger.info(f"[LangChain+Memory] Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
         
         # Process each chunk and accumulate results
         all_results = {
@@ -616,193 +570,255 @@ def _extract_fields_with_langchain(
         
         for i, chunk in enumerate(chunks):
             try:
-                logger.debug(f"[LangChain] Processing chunk {i+1}/{len(chunks)} for {medical_name}")
+                logger.debug(f"[LangChain+Memory] Processing chunk {i+1}/{len(chunks)} for {medical_name}")
                 
-                prompt = f"""Extract dosage information for {medical_name} from the following drugs.com page content.
+                prompt = f"""Extract ONLY the missing fields for {medical_name} from the drugs.com page content.
+Be VERY CAREFUL and ACCURATE - extract dosages that match the specific patient conditions and parameters.
 
-Antibiotic Name: {medical_name}
-Patient Age: {patient_age_str}
-ICD Code Names (Disease Conditions): {icd_code_names_str}
-Resistance Gene: {resistance_gene_str}
-Missing Fields to Extract: {missing_fields_str}
+PATIENT CONTEXT (CRITICAL - use these to extract appropriate dosages):
+- Antibiotic Name: {medical_name}
+- Patient Age: {patient_age_str}
+- ICD Code Names (Disease Conditions): {icd_code_names_str}
+- Resistance Gene: {resistance_gene_str}
+
+MISSING FIELDS TO EXTRACT (extract ONLY these): {missing_fields_str}
+
+EXISTING DATA (use as context, do NOT extract these):
+{existing_data_context}
+
+PREVIOUS CHUNK CONTEXTS:
+{previous_context_summary}
 
 PAGE CONTENT (chunk {i+1} of {len(chunks)}):
 {chunk}
 
-Extract the following fields:
-- dose_duration: Dosing information in format 'dose,route,frequency,duration' or null if not found
-- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null if not found
-- general_considerations: Concise clinical notes/considerations in plain text (max 200 chars) or null if not found. Extract only key points like monitoring requirements, contraindications, special precautions - be brief and factual. Use plain text, not bullet points.
-- coverage_for: What conditions/infections this antibiotic covers or null if not found
-- renal_adjustment: Renal adjustment/dosing guidelines or null if not found
+CRITICAL DOSAGE EXTRACTION RULES:
+1. Extract dosages that are SPECIFICALLY appropriate for the ICD Code Names: {icd_code_names_str}
+2. Consider the Resistance Gene: {resistance_gene_str} when selecting dosage
+3. Consider Patient Age: {patient_age_str} when selecting dosage (pediatric vs adult dosing)
+4. DO NOT extract duplicate or conflicting dosages - if you see multiple similar dosages, choose the ONE most appropriate for the conditions
+5. DO NOT include loading doses - only maintenance doses
+6. If the page shows different dosages for different conditions, extract ONLY the dosage(s) relevant to: {icd_code_names_str}
+7. Frequency MUST include "q" prefix: q8h, q12h, q24h (NEVER just 8h, 12h, 24h)
+8. Be precise - do not create variations or duplicates
 
-Only extract fields that are in the missing_fields list. If a field is not missing, return null for it."""
+DATA INTEROPERABILITY RULES:
+- Use existing filled fields as context to guide extraction of missing fields
+- Extracted missing fields must be medically consistent with existing fields
+- All fields must work together logically - no contradictions
+
+INSTRUCTIONS:
+1. Extract ONLY fields in missing_fields: {missing_fields_str}
+2. For fields NOT in missing_fields, return the existing value exactly (do not extract)
+3. When extracting dose_duration, carefully match it to ICD Code Names: {icd_code_names_str}
+4. When extracting dose_duration, consider Resistance Gene: {resistance_gene_str}
+5. When extracting dose_duration, consider Patient Age: {patient_age_str}
+6. Maintain consistency with previous chunk contexts
+
+FIELD DESCRIPTIONS (extract ONLY if in missing_fields):
+- dose_duration: Dosing information in format 'dose,route,frequency,duration'. 
+  * MUST match the ICD Code Names: {icd_code_names_str}
+  * MUST consider Resistance Gene: {resistance_gene_str}
+  * MUST consider Patient Age: {patient_age_str}
+  * Frequency MUST include "q" prefix (q8h, q12h, q24h). 
+  * DO NOT include loading doses - only maintenance doses.
+  * DO NOT create duplicates - if multiple similar dosages exist, choose ONE most appropriate.
+  * If truly different dosages for different conditions (and both are in ICD codes), use pipe separator.
+  * Examples: "600 mg,IV,q12h,14 days" or "500 mg,PO,q8h,7 days|600 mg,IV,q12h,14 days"
+  
+- route_of_administration: Route of administration. Must be one of: 'IV', 'PO', 'IM', 'IV/PO'.
+  Examples: "IV", "PO", "IV/PO"
+  
+- general_considerations: Clinical notes and considerations. 
+  * If dose_duration contains multiple dosages (separated by |), mention which condition from ICD codes each dosage is for.
+  * Examples: "Monitor renal function, risk of nephrotoxicity" or "For bacteremia: 600 mg IV q12h. For pneumonia: 500 mg PO q8h. Monitor renal function."
+  
+- coverage_for: Conditions or infections this antibiotic covers. Should align with ICD Code Names: {icd_code_names_str}
+  Examples: "MRSA bacteremia, MRSA endocarditis" or "Sepsis due to Staphylococcus aureus, Community-acquired pneumonia"
+  
+- renal_adjustment: Renal adjustment or dosing guidelines for patients with renal impairment.
+  * Be concise and factual - NO repetition, NO references, NO citations.
+  * Extract only the essential adjustment information.
+  * Examples: "Adjust dose in CrCl < 30 mL/min" or "No adjustment needed" or "Reduce dose by 50% in CrCl < 30 mL/min"
+
+CRITICAL: 
+- Extract ONLY missing fields - return existing values for all other fields
+- Use ICD Code Names, Resistance Gene, and Patient Age to extract ACCURATE dosages
+- DO NOT create duplicate or conflicting dosages
+- DO NOT include loading doses
+- Be precise and careful - accuracy is more important than completeness"""
                 
                 result = structured_llm.invoke(prompt)
                 
-                # Collect non-null results
+                # Store chunk context in memory
+                extracted_from_chunk = {}
                 if result.dose_duration:
-                    all_results['dose_duration'].append(result.dose_duration)
+                    extracted_from_chunk['dose_duration'] = result.dose_duration
                 if result.route_of_administration:
-                    all_results['route_of_administration'].append(result.route_of_administration)
+                    extracted_from_chunk['route_of_administration'] = result.route_of_administration
                 if result.general_considerations:
-                    all_results['general_considerations'].append(result.general_considerations)
+                    extracted_from_chunk['general_considerations'] = result.general_considerations
                 if result.coverage_for:
-                    all_results['coverage_for'].append(result.coverage_for)
+                    extracted_from_chunk['coverage_for'] = result.coverage_for
                 if result.renal_adjustment:
+                    extracted_from_chunk['renal_adjustment'] = result.renal_adjustment
+                
+                _store_chunk_context(store, medical_name, i, chunk, extracted_from_chunk)
+                
+                # Collect non-null results (only for missing fields)
+                if 'dose_duration' in missing_fields and result.dose_duration:
+                    all_results['dose_duration'].append(result.dose_duration)
+                if 'route_of_administration' in missing_fields and result.route_of_administration:
+                    all_results['route_of_administration'].append(result.route_of_administration)
+                if 'general_considerations' in missing_fields and result.general_considerations:
+                    all_results['general_considerations'].append(result.general_considerations)
+                if 'coverage_for' in missing_fields and result.coverage_for:
+                    all_results['coverage_for'].append(result.coverage_for)
+                if 'renal_adjustment' in missing_fields and result.renal_adjustment:
                     all_results['renal_adjustment'].append(result.renal_adjustment)
                     
             except Exception as e:
-                logger.warning(f"[LangChain] Error processing chunk {i+1} for {medical_name}: {e}")
+                logger.warning(f"[LangChain+Memory] Error processing chunk {i+1} for {medical_name}: {e}")
                 continue
         
-        # Merge results: use first non-null value found, or combine if multiple found
+        # Merge results: blend with existing data
         extracted = {}
         
-        if 'dose_duration' in missing_fields:
-            if all_results['dose_duration']:
-                extracted['dose_duration'] = all_results['dose_duration'][0]
+        # For each field, use existing if present, otherwise use first extracted value
+        for field in ['dose_duration', 'route_of_administration', 'coverage_for', 'renal_adjustment']:
+            if field in missing_fields:
+                if all_results[field]:
+                    extracted[field] = all_results[field][0]
+                elif existing_data.get(field):
+                    # Keep existing if extraction failed
+                    extracted[field] = existing_data[field]
+                else:
+                    extracted[field] = None
             else:
-                extracted['dose_duration'] = None
+                # Not missing, preserve existing
+                extracted[field] = existing_data.get(field)
         
-        if 'route_of_administration' in missing_fields:
-            if all_results['route_of_administration']:
-                extracted['route_of_administration'] = all_results['route_of_administration'][0]
-            else:
-                extracted['route_of_administration'] = None
-        
+        # Special handling for general_considerations - blend if both exist
         if 'general_considerations' in missing_fields:
             if all_results['general_considerations']:
-                # For general_considerations, prefer concise entries
                 considerations = all_results['general_considerations']
-                # Sort by length (shorter = more concise)
                 considerations.sort(key=len)
-                # Take the shortest one, or combine first 2 if they're both short
-                if len(considerations) == 1:
-                    extracted['general_considerations'] = considerations[0]
+                
+                if existing_data.get('general_considerations'):
+                    # Blend with existing
+                    existing_cons = existing_data['general_considerations']
+                    new_cons = considerations[0]
+                    # Combine if total length is reasonable
+                    combined = f"{existing_cons}. {new_cons}"
+                    if len(combined) <= 300:
+                        extracted['general_considerations'] = combined
+                    else:
+                        extracted['general_considerations'] = existing_cons  # Keep existing if too long
                 else:
-                    # Combine first 2 shortest, but limit total length
-                    combined = " ".join(considerations[:2])
-                    if len(combined) > 300:
-                        # If too long, just take the shortest
+                    # No existing, use extracted
+                    if len(considerations) == 1:
                         extracted['general_considerations'] = considerations[0]
                     else:
-                        extracted['general_considerations'] = combined
+                        combined = " ".join(considerations[:2])
+                        if len(combined) > 300:
+                            extracted['general_considerations'] = considerations[0]
+                        else:
+                            extracted['general_considerations'] = combined
+            elif existing_data.get('general_considerations'):
+                extracted['general_considerations'] = existing_data['general_considerations']
             else:
                 extracted['general_considerations'] = None
+        else:
+            # Not missing, preserve existing
+            extracted['general_considerations'] = existing_data.get('general_considerations')
         
-        if 'coverage_for' in missing_fields:
-            if all_results['coverage_for']:
-                extracted['coverage_for'] = all_results['coverage_for'][0]
-            else:
-                extracted['coverage_for'] = None
-        
-        if 'renal_adjustment' in missing_fields:
-            if all_results['renal_adjustment']:
-                extracted['renal_adjustment'] = all_results['renal_adjustment'][0]
-            else:
-                extracted['renal_adjustment'] = None
-        
-        logger.info(f"[LangChain] Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v]}")
+        logger.info(f"[LangChain+Memory] Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v and k in missing_fields]}")
         return extracted
         
     except Exception as e:
-        logger.error(f"Error extracting fields with LangChain for {medical_name}: {e}")
+        logger.error(f"Error extracting fields with LangChain+Memory for {medical_name}: {e}")
         return {}
 
 
 def _scrape_antibiotic_page(
     antibiotic: Dict[str, Any],
     category: str,
-    idx: int
-) -> Tuple[str, int, Optional[str], List[str]]:
+    idx: int,
+    llm: Optional[BaseChatModel] = None
+) -> Tuple[str, int, Optional[str], List[str], bool, int]:
     """
     Scrape page content for a single antibiotic in a separate thread with its own browser.
-    Only does Selenium scraping - no DSPy extraction (that happens in main thread).
     
     Args:
         antibiotic: Antibiotic dictionary
         category: Category name (first_choice, second_choice, alternative_antibiotic)
         idx: Index of the antibiotic in the list
+        llm: Optional LLM for validation
         
     Returns:
-        Tuple of (category, idx, page_content, missing_fields) where page_content is None if scraping failed
+        Tuple of (category, idx, page_content, missing_fields, validation_failed, num_chunks) 
+        where validation_failed=True means the drug name didn't match and should be removed
+        num_chunks is the number of chunks the page content would be split into
     """
     medical_name = antibiotic.get('medical_name', '')
     if not medical_name:
-        return (category, idx, None, [])
+        return (category, idx, None, [], False, 0)
     
-    # Determine which fields are missing
-    # Check if ANY of these fields are null: coverage_for, route_of_administration, renal_adjustment, general_considerations
-    # If any are null, we need to extract ALL fields for data interoperability
-    coverage_for = antibiotic.get('coverage_for')
-    route_of_administration = antibiotic.get('route_of_administration')
-    renal_adjustment = antibiotic.get('renal_adjustment')
-    general_considerations = antibiotic.get('general_considerations')
-    dose_duration = antibiotic.get('dose_duration')
-    
-    # Check if any of the 4 key fields are null
-    needs_full_extraction = (
-        coverage_for is None or 
-        route_of_administration is None or 
-        renal_adjustment is None or 
-        general_considerations is None
-    )
-    
+    # Determine which fields are missing - check ALL fields that are null
     missing_fields = []
-    if dose_duration is None:
+    if antibiotic.get('dose_duration') is None:
         missing_fields.append('dose_duration')
-    if route_of_administration is None:
+    if antibiotic.get('route_of_administration') is None:
         missing_fields.append('route_of_administration')
-    if general_considerations is None:
-        missing_fields.append('general_considerations')
-    if coverage_for is None:
+    if antibiotic.get('coverage_for') is None:
         missing_fields.append('coverage_for')
-    if renal_adjustment is None:
+    if antibiotic.get('renal_adjustment') is None:
         missing_fields.append('renal_adjustment')
-    
-    # If any of the 4 key fields are null, extract all fields
-    if needs_full_extraction:
-        missing_fields = ['dose_duration', 'route_of_administration', 'general_considerations', 'coverage_for', 'renal_adjustment']
+    if antibiotic.get('general_considerations') is None:
+        missing_fields.append('general_considerations')
     
     if not missing_fields:
-        return (category, idx, None, [])
+        return (category, idx, None, [], False, 0)
     
     driver = None
     try:
-        # Create a new driver for this thread
         driver = _get_selenium_driver()
         if not driver:
             logger.error(f"[Thread] Could not create Selenium driver for {medical_name}")
-            return (category, idx, None, missing_fields)
+            return (category, idx, None, missing_fields, False, 0)
         
         logger.info(f"[Thread] Scraping {medical_name} from drugs.com (missing: {', '.join(missing_fields)})...")
         
-        # Search Google using Selenium for drugs.com dosage URL
         drugs_com_url = _google_search_drugs_com_selenium(medical_name, driver)
         
         if drugs_com_url:
-            # Navigate directly to the URL
-            logger.info(f"[Thread] Navigating directly to {drugs_com_url}")
+            # Validate that the page is about the same antibiotic before scraping
+            if llm:
+                is_valid = _validate_antibiotic_match(drugs_com_url, medical_name, driver, llm)
+                if not is_valid:
+                    logger.warning(f"[Thread] Page validation failed for {medical_name} - drug name doesn't match, will remove from result")
+                    return (category, idx, None, missing_fields, True, 0)  # validation_failed=True
             
-            # Scrape the page content from #content element
+            logger.info(f"[Thread] Navigating directly to {drugs_com_url}")
             page_content = _scrape_drugs_com_page(drugs_com_url, driver)
             
             if page_content:
-                logger.info(f"[Thread] Successfully scraped page for {medical_name}")
-                return (category, idx, page_content, missing_fields)
+                # Calculate number of chunks
+                chunks = _chunk_text(page_content, chunk_size=6000, overlap=500)
+                num_chunks = len(chunks)
+                logger.info(f"[Thread] Successfully scraped page for {medical_name} ({num_chunks} chunks)")
+                return (category, idx, page_content, missing_fields, False, num_chunks)
             else:
                 logger.warning(f"[Thread] Could not scrape page for {medical_name}")
-                return (category, idx, None, missing_fields)
+                return (category, idx, None, missing_fields, False, 0)
         else:
             logger.warning(f"[Thread] Could not find drugs.com dosage URL for {medical_name}")
-            return (category, idx, None, missing_fields)
+            return (category, idx, None, missing_fields, False, 0)
             
     except Exception as e:
         logger.error(f"[Thread] Error scraping {medical_name}: {e}", exc_info=True)
-        return (category, idx, None, missing_fields)
+        return (category, idx, None, missing_fields, False, 0)
     finally:
-        # Always close the driver
         if driver:
             try:
                 driver.quit()
@@ -813,17 +829,15 @@ def _scrape_antibiotic_page(
 def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Enrichment node that extracts content from drugs.com for antibiotics with missing fields.
-    Takes input from synthesize_node output (result field).
-    Finds entries where dose_duration OR route_of_administration OR general_considerations is null.
-    Uses Selenium to search Google and find drugs.com dosage pages.
-    Processes 3 antibiotics in parallel using multiple browsers.
-    Drops records if no valid drugs.com dosage URL is found.
+    Only processes entries where is_complete is False.
+    Uses LangGraph memory store to store previous chunk context to avoid randomness.
+    Blends extracted fields with existing data.
     
     Args:
         state: Pipeline state dictionary (should have 'result' from synthesize_node)
         
     Returns:
-        Updated state with enriched result (records without valid drugs.com URLs are removed)
+        Updated state with enriched result
     """
     try:
         result = state.get('result', {})
@@ -832,14 +846,20 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
             return {'result': result}
         
         if not SELENIUM_AVAILABLE:
-            logger.error("Selenium/undetected-chromedriver is not available. Cannot perform enrichment.")
-            logger.error("Please install undetected-chromedriver: pip install undetected-chromedriver")
-            logger.error("The enrichment node requires undetected-chromedriver to scrape drugs.com pages.")
+            logger.error("Selenium is not available. Cannot perform enrichment.")
+            logger.error("Please install selenium: pip install selenium")
             return {'result': result}
+        
+        # Get or create memory store
+        store = _get_or_create_store(state)
+        
+        # Get LLM
+        from config import get_ollama_llm
+        llm = get_ollama_llm()
         
         therapy_plan = result.get('antibiotic_therapy_plan', {})
         
-        # Collect all antibiotics that need processing
+        # Collect all antibiotics that need processing (only is_complete: false)
         antibiotics_to_process = []
         
         for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
@@ -852,223 +872,288 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 if not medical_name:
                     continue
                 
-                # Check if ANY of these fields are null: coverage_for, route_of_administration, renal_adjustment, general_considerations
-                # If any are null, we need to extract ALL fields for data interoperability
-                coverage_for = antibiotic.get('coverage_for')
-                route_of_administration = antibiotic.get('route_of_administration')
-                renal_adjustment = antibiotic.get('renal_adjustment')
-                general_considerations = antibiotic.get('general_considerations')
-                dose_duration = antibiotic.get('dose_duration')
+                # Only process if is_complete is False
+                is_complete = antibiotic.get('is_complete', True)  # Default to True if not set
+                if is_complete:
+                    logger.debug(f"Skipping {medical_name} (is_complete=True)")
+                    continue
                 
-                # Check if any of the 4 key fields are null OR if dose_duration is null
-                if (coverage_for is None or 
-                    route_of_administration is None or 
-                    renal_adjustment is None or 
-                    general_considerations is None or
-                    dose_duration is None):
-                    antibiotics_to_process.append((antibiotic, category, idx))
+                # Check which fields are missing - extract ALL null fields from drugs.com
+                missing_fields = []
+                if antibiotic.get('dose_duration') is None:
+                    missing_fields.append('dose_duration')
+                if antibiotic.get('route_of_administration') is None:
+                    missing_fields.append('route_of_administration')
+                if antibiotic.get('coverage_for') is None:
+                    missing_fields.append('coverage_for')
+                if antibiotic.get('renal_adjustment') is None:
+                    missing_fields.append('renal_adjustment')
+                if antibiotic.get('general_considerations') is None:
+                    missing_fields.append('general_considerations')
+                
+                # Only process if there are missing fields to extract
+                if missing_fields:
+                    antibiotics_to_process.append((antibiotic, category, idx, missing_fields))
         
         if not antibiotics_to_process:
-            logger.info("No antibiotics need enrichment")
+            logger.info("No incomplete antibiotics need enrichment")
             return {'result': result}
         
-        logger.info(f"Processing {len(antibiotics_to_process)} antibiotics in parallel (3 at a time)...")
+        logger.info(f"Processing {len(antibiotics_to_process)} incomplete antibiotics...")
         
-        # Process antibiotics in parallel (3 at a time)
+        input_params = state.get('input_parameters', {})
+        
+        # Get ICD code names from transformed state
+        icd_code_names = get_icd_names_from_state(state)
+        
+        # Get resistance gene from input parameters and format
+        resistance_gene_raw = input_params.get('resistant_gene', '')
+        resistance_gene = format_resistance_genes(resistance_gene_raw) if resistance_gene_raw else None
+        
+        age = input_params.get('age')
+        
+        # Separate antibiotics by category
+        first_choice_ab = [(ab, cat, idx, mf) for ab, cat, idx, mf in antibiotics_to_process if cat == 'first_choice']
+        second_choice_ab = [(ab, cat, idx, mf) for ab, cat, idx, mf in antibiotics_to_process if cat == 'second_choice']
+        alternative_ab = [(ab, cat, idx, mf) for ab, cat, idx, mf in antibiotics_to_process if cat == 'alternative_antibiotic']
+        
+        # Track antibiotics to remove (validation failed)
         antibiotics_to_remove = {
             'first_choice': [],
             'second_choice': [],
             'alternative_antibiotic': []
         }
         
-        input_params = state.get('input_parameters', {})
-        
-        # Get ICD code names from transformed state
-        icd_transformation = state.get('icd_transformation', {})
-        icd_code_names = None
-        if icd_transformation and icd_transformation.get('severity_codes_transformed'):
-            icd_code_names = icd_transformation['severity_codes_transformed']
-        
-        # Get resistance gene from input parameters and format (handle comma-separated)
-        resistance_gene_raw = input_params.get('resistant_gene', '')
-        resistance_gene = format_resistance_genes(resistance_gene_raw) if resistance_gene_raw else None
-        
-        # Configure DSPy once before processing
-        _configure_dspy()
-        
-        age = input_params.get('age')
-        
-        # Separate antibiotics by category
-        first_choice_ab = [(ab, cat, idx) for ab, cat, idx in antibiotics_to_process if cat == 'first_choice']
-        second_choice_ab = [(ab, cat, idx) for ab, cat, idx in antibiotics_to_process if cat == 'second_choice']
-        alternative_ab = [(ab, cat, idx) for ab, cat, idx in antibiotics_to_process if cat == 'alternative_antibiotic']
-        
         # Process first_choice and second_choice sequentially
-        for antibiotic, category, idx in first_choice_ab + second_choice_ab:
+        # For first_choice and second_choice: if extraction fails (no required fields), drop the antibiotic
+        for antibiotic, category, idx, missing_fields in first_choice_ab + second_choice_ab:
             medical_name = antibiotic.get('medical_name', 'unknown')
             try:
                 logger.info(f"Processing {medical_name}...")
                 
-                # Step 1: Scrape page content
+                # Step 1: Scrape page content (with validation)
                 logger.info(f"  [1/2] Scraping {medical_name} from drugs.com...")
-                category_result, idx_result, page_content, missing_fields = _scrape_antibiotic_page(antibiotic, category, idx)
+                category_result, idx_result, page_content, scraped_missing_fields, validation_failed, num_chunks = _scrape_antibiotic_page(antibiotic, category, idx, llm)
                 
-                if not page_content:
-                    logger.warning(f"  Could not scrape {medical_name}, marking for removal")
+                # If validation failed (name doesn't match), mark for removal
+                if validation_failed:
+                    logger.warning(f"  Validation failed for {medical_name} - removing from result")
                     antibiotics_to_remove[category].append(idx)
                     continue
                 
-                # Step 2: Extract fields using DSPy
-                logger.info(f"  [2/2] Extracting fields for {medical_name}...")
-                extracted_fields = _extract_fields_with_dspy(
+                if not page_content:
+                    logger.warning(f"  Could not scrape {medical_name}, removing from result (first_choice/second_choice require extraction)")
+                    antibiotics_to_remove[category].append(idx)
+                    continue
+                
+                # Step 2: Extract fields using LangChain with memory
+                logger.info(f"  [2/2] Extracting fields for {medical_name} with memory context...")
+                extracted_fields = _extract_fields_with_langchain_memory(
                     page_content=page_content,
                     medical_name=medical_name,
                     missing_fields=missing_fields,
+                    existing_data=antibiotic,  # Pass existing data to blend with
                     age=age,
+                    llm=llm,
+                    store=store,
                     icd_code_names=icd_code_names,
                     resistance_gene=resistance_gene
                 )
                 
-                # Update antibiotic with extracted fields
-                if 'dose_duration' in extracted_fields and extracted_fields['dose_duration']:
-                    antibiotic['dose_duration'] = extracted_fields['dose_duration']
-                    logger.info(f"  ✓ Updated dose_duration for {medical_name}")
+                # Update antibiotic with extracted fields (only update missing fields)
+                updated = False
+                required_fields_updated = False
+                for field in missing_fields:
+                    if field in extracted_fields and extracted_fields[field]:
+                        antibiotic[field] = extracted_fields[field]
+                        updated = True
+                        # Check if this is a required field (for completeness)
+                        if field in ['coverage_for', 'dose_duration', 'route_of_administration']:
+                            required_fields_updated = True
+                        logger.info(f"  ✓ Updated {field} for {medical_name}")
                 
-                if 'route_of_administration' in extracted_fields and extracted_fields['route_of_administration']:
-                    antibiotic['route_of_administration'] = extracted_fields['route_of_administration']
-                    logger.info(f"  ✓ Updated route_of_administration for {medical_name}")
+                # Update is_complete status
+                antibiotic['is_complete'] = (
+                    antibiotic.get('medical_name') is not None and
+                    antibiotic.get('coverage_for') is not None and
+                    antibiotic.get('dose_duration') is not None and
+                    antibiotic.get('route_of_administration') is not None
+                )
                 
-                if 'general_considerations' in extracted_fields and extracted_fields['general_considerations']:
-                    antibiotic['general_considerations'] = extracted_fields['general_considerations']
-                    logger.info(f"  ✓ Updated general_considerations for {medical_name}")
+                # For first_choice and second_choice: if no required fields were extracted, remove it
+                if not updated or (missing_fields and not required_fields_updated):
+                    logger.warning(f"  No required fields extracted for {medical_name}, removing from {category} (first_choice/second_choice require extraction)")
+                    antibiotics_to_remove[category].append(idx)
+                    continue
                 
-                if 'coverage_for' in extracted_fields and extracted_fields['coverage_for']:
-                    antibiotic['coverage_for'] = extracted_fields['coverage_for']
-                    logger.info(f"  ✓ Updated coverage_for for {medical_name}")
-                
-                if 'renal_adjustment' in extracted_fields and extracted_fields['renal_adjustment']:
-                    antibiotic['renal_adjustment'] = extracted_fields['renal_adjustment']
-                    logger.info(f"  ✓ Updated renal_adjustment for {medical_name}")
-                
-                logger.info(f"  ✓ Completed {medical_name}")
+                if updated:
+                    logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete={antibiotic['is_complete']})")
+                else:
+                    logger.warning(f"  No fields updated for {medical_name}")
                 
             except Exception as e:
                 logger.error(f"Error processing {medical_name}: {e}", exc_info=True)
+                # For first_choice/second_choice, remove on error
                 antibiotics_to_remove[category].append(idx)
+                continue
         
-        # Process alternative_antibiotic: scrape all concurrently, then select top 5, then process sequentially
+        # Process alternative_antibiotic: check how many are already complete, only process enough to reach 5 total
         if alternative_ab:
-            logger.info(f"Processing {len(alternative_ab)} alternative_antibiotic: scraping all concurrently, then selecting top 5...")
+            # Count how many alternative_antibiotic are already complete
+            all_alternative = therapy_plan.get('alternative_antibiotic', [])
+            complete_count = sum(1 for ab in all_alternative if ab.get('is_complete', False))
             
-            # Step 1: Scrape all alternative_antibiotic concurrently
-            scraped_alternative = {}  # {(category, idx): (page_content, missing_fields, antibiotic, num_chunks)}
+            logger.info(f"Found {complete_count} complete alternative_antibiotic entries, {len(alternative_ab)} incomplete ones")
             
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_to_antibiotic = {
-                    executor.submit(_scrape_antibiotic_page, ab, cat, idx): (ab, cat, idx)
-                    for ab, cat, idx in alternative_ab
-                }
+            # If we already have 5 or more complete, skip processing
+            if complete_count >= 5:
+                logger.info(f"Already have {complete_count} complete alternative_antibiotic (>= 5), skipping enrichment for incomplete ones")
+            else:
+                # Calculate how many we need to process
+                needed = 5 - complete_count
+                logger.info(f"Need {needed} more complete alternative_antibiotic to reach 5 total. Processing {len(alternative_ab)} incomplete ones...")
                 
-                for future in as_completed(future_to_antibiotic):
-                    try:
-                        category, idx, page_content, missing_fields = future.result()
-                        ab, cat, idx_orig = future_to_antibiotic[future]
+                # Step 1: Scrape all incomplete alternative_antibiotic concurrently
+                scraped_alternative = {}  # {(category, idx): (page_content, missing_fields, antibiotic, num_chunks, validation_failed)}
+                
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    future_to_antibiotic = {
+                        executor.submit(_scrape_antibiotic_page, ab, cat, idx, llm): (ab, cat, idx, mf)
+                        for ab, cat, idx, mf in alternative_ab
+                    }
+                    
+                    for future in as_completed(future_to_antibiotic):
+                        try:
+                            category, idx, page_content, missing_fields, validation_failed, num_chunks = future.result()
+                            ab, cat, idx_orig, mf = future_to_antibiotic[future]
+                            
+                            if validation_failed:
+                                # Mark for removal
+                                antibiotics_to_remove[category].append(idx)
+                                logger.warning(f"Validation failed for {ab.get('medical_name', 'unknown')} - will remove")
+                            elif page_content:
+                                # Store successful scrapes with chunk count
+                                scraped_alternative[(category, idx)] = (page_content, missing_fields, ab, num_chunks, False)
+                            else:
+                                # Scraping failed, mark for removal
+                                antibiotics_to_remove[category].append(idx)
+                        except Exception as e:
+                            logger.error(f"Error getting scraping result: {e}")
+                            if future in future_to_antibiotic:
+                                ab, cat, idx, mf = future_to_antibiotic[future]
+                                antibiotics_to_remove[cat].append(idx)
+                
+                # Step 2: Select top N with fewer chunks (where N = needed, excluding validation failures)
+                if scraped_alternative:
+                    # Sort by number of chunks (ascending - fewer chunks first)
+                    sorted_alternatives = sorted(
+                        scraped_alternative.items(),
+                        key=lambda x: x[1][3] if len(x[1]) > 3 else float('inf')  # Sort by num_chunks (4th element)
+                    )
+                    
+                    # Step 3: Process sequentially, trying to get enough complete ones
+                    # For alternative_antibiotic: if extraction fails for one, we can try others
+                    processed_count = 0
+                    successfully_completed = []
+                    processed_indices = set()
+                    
+                    # Process enough to reach 5 total complete entries
+                    for (category, idx), (page_content, missing_fields, antibiotic, num_chunks, _) in sorted_alternatives:
+                        if processed_count >= needed:
+                            break
                         
-                        if page_content:
-                            # Calculate number of chunks (fewer chunks = better)
-                            chunks = _chunk_text(page_content, chunk_size=6000, overlap=500)
-                            num_chunks = len(chunks)
-                            scraped_alternative[(category, idx)] = (page_content, missing_fields, ab, num_chunks)
-                        else:
+                        medical_name = antibiotic.get('medical_name', 'unknown')
+                        try:
+                            logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks)...")
+                            
+                            # Extract fields using LangChain with memory
+                            extracted_fields = _extract_fields_with_langchain_memory(
+                                page_content=page_content,
+                                medical_name=medical_name,
+                                missing_fields=missing_fields,
+                                existing_data=antibiotic,
+                                age=age,
+                                llm=llm,
+                                store=store,
+                                icd_code_names=icd_code_names,
+                                resistance_gene=resistance_gene
+                            )
+                            
+                            # Update antibiotic with extracted fields
+                            updated = False
+                            for field in missing_fields:
+                                if field in extracted_fields and extracted_fields[field]:
+                                    antibiotic[field] = extracted_fields[field]
+                                    updated = True
+                                    logger.info(f"  ✓ Updated {field} for {medical_name}")
+                            
+                            # Update is_complete status
+                            antibiotic['is_complete'] = (
+                                antibiotic.get('medical_name') is not None and
+                                antibiotic.get('coverage_for') is not None and
+                                antibiotic.get('dose_duration') is not None and
+                                antibiotic.get('route_of_administration') is not None
+                            )
+                            
+                            processed_indices.add(idx)
+                            
+                            if antibiotic['is_complete']:
+                                processed_count += 1
+                                successfully_completed.append((category, idx))
+                                logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete=True, {processed_count}/{needed} needed)")
+                            elif updated:
+                                # Got some fields but not complete - keep it for alternative_antibiotic
+                                logger.info(f"  ✓ Updated fields for {medical_name} but not yet complete (is_complete={antibiotic['is_complete']})")
+                            else:
+                                # Extraction failed completely - for alternative_antibiotic, we can try others, but remove this one
+                                logger.warning(f"  No fields extracted for {medical_name}, will try others if needed")
+                                antibiotics_to_remove[category].append(idx)
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing {medical_name}: {e}", exc_info=True)
+                            # For alternative_antibiotic, continue trying others, but remove this one
+                            processed_indices.add(idx)
                             antibiotics_to_remove[category].append(idx)
-                    except Exception as e:
-                        logger.error(f"Error getting scraping result: {e}")
-                        if future in future_to_antibiotic:
-                            ab, cat, idx = future_to_antibiotic[future]
-                            antibiotics_to_remove[cat].append(idx)
-                        else:
-                            logger.warning(f"Future not found in future_to_antibiotic mapping")
-            
-            # Step 2: Select top 5 with fewer chunks
-            if scraped_alternative:
-                # Sort by number of chunks (ascending - fewer chunks first)
-                sorted_alternatives = sorted(
-                    scraped_alternative.items(),
-                    key=lambda x: x[1][3] if len(x[1]) > 3 else float('inf')  # Sort by num_chunks (4th element in tuple)
-                )
-                
-                # Take top 5
-                top_5 = sorted_alternatives[:5]
-                logger.info(f"Selected top 5 alternative_antibiotic (with fewer chunks): {[ab.get('medical_name', 'unknown') for _, (_, _, ab, _) in top_5]}")
-                
-                # Step 3: Process top 5 sequentially
-                for (category, idx), (page_content, missing_fields, antibiotic, num_chunks) in top_5:
-                    medical_name = antibiotic.get('medical_name', 'unknown')
-                    try:
-                        logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks)...")
-                        
-                        # Extract fields using DSPy
-                        extracted_fields = _extract_fields_with_dspy(
-                            page_content=page_content,
-                            medical_name=medical_name,
-                            missing_fields=missing_fields,
-                            age=age,
-                            icd_code_names=icd_code_names,
-                            resistance_gene=resistance_gene
-                        )
-                        
-                        # Update antibiotic with extracted fields
-                        if 'dose_duration' in extracted_fields and extracted_fields['dose_duration']:
-                            antibiotic['dose_duration'] = extracted_fields['dose_duration']
-                            logger.info(f"  ✓ Updated dose_duration for {medical_name}")
-                        
-                        if 'route_of_administration' in extracted_fields and extracted_fields['route_of_administration']:
-                            antibiotic['route_of_administration'] = extracted_fields['route_of_administration']
-                            logger.info(f"  ✓ Updated route_of_administration for {medical_name}")
-                        
-                        if 'general_considerations' in extracted_fields and extracted_fields['general_considerations']:
-                            antibiotic['general_considerations'] = extracted_fields['general_considerations']
-                            logger.info(f"  ✓ Updated general_considerations for {medical_name}")
-                        
-                        if 'coverage_for' in extracted_fields and extracted_fields['coverage_for']:
-                            antibiotic['coverage_for'] = extracted_fields['coverage_for']
-                            logger.info(f"  ✓ Updated coverage_for for {medical_name}")
-                        
-                        if 'renal_adjustment' in extracted_fields and extracted_fields['renal_adjustment']:
-                            antibiotic['renal_adjustment'] = extracted_fields['renal_adjustment']
-                            logger.info(f"  ✓ Updated renal_adjustment for {medical_name}")
-                        
-                        logger.info(f"  ✓ Completed {medical_name}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing {medical_name}: {e}", exc_info=True)
+                            continue
+                    
+                    # Remove the alternative_antibiotic that weren't processed (because we already have enough complete ones)
+                    for (category, idx), _ in scraped_alternative.items():
+                        if idx not in processed_indices:
+                            antibiotics_to_remove[category].append(idx)
+                            ab_name = scraped_alternative[(category, idx)][2].get('medical_name', 'unknown') if (category, idx) in scraped_alternative else 'unknown'
+                            logger.info(f"Removed {ab_name} (not selected for processing - enough complete entries or lower priority)")
+                else:
+                    # No valid scraped results, mark all for removal
+                    logger.warning("No valid alternative_antibiotic after scraping and validation")
+                    for (category, idx), _ in scraped_alternative.items():
                         antibiotics_to_remove[category].append(idx)
-                
-                # Remove the alternative_antibiotic that weren't in top 5
-                top_5_indices = {idx for (_, idx), _ in top_5}
-                for (category, idx), _ in scraped_alternative.items():
-                    if idx not in top_5_indices:
-                        antibiotics_to_remove[category].append(idx)
-                        # Safely get antibiotic name
-                        antibiotic_data = scraped_alternative.get((category, idx))
-                        if antibiotic_data and len(antibiotic_data) >= 3:
-                            ab_name = antibiotic_data[2].get('medical_name', 'unknown') if isinstance(antibiotic_data[2], dict) else 'unknown'
-                        else:
-                            ab_name = 'unknown'
-                        logger.info(f"Removed {ab_name} (not in top 5)")
         
-        # Remove antibiotics that didn't have valid drugs.com URLs
+        # Remove antibiotics that failed validation
         for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
             antibiotics = therapy_plan.get(category, [])
-            if isinstance(antibiotics, list):
+            if isinstance(antibiotics, list) and antibiotics_to_remove[category]:
                 # Remove in reverse order to maintain indices
                 for idx in sorted(antibiotics_to_remove[category], reverse=True):
                     if 0 <= idx < len(antibiotics):
                         removed_ab = antibiotics.pop(idx)
                         ab_name = removed_ab.get('medical_name', 'unknown') if isinstance(removed_ab, dict) else 'unknown'
-                        logger.info(f"Removed {ab_name} from {category} (no valid drugs.com URL)")
-                    else:
-                        logger.warning(f"Invalid index {idx} for {category} (list length: {len(antibiotics)})")
+                        logger.info(f"Removed {ab_name} from {category} (validation failed - drug name doesn't match)")
+        
+        # Final cleanup: Remove incomplete alternative_antibiotic if we already have 5+ complete ones
+        alternative_antibiotics = therapy_plan.get('alternative_antibiotic', [])
+        if isinstance(alternative_antibiotics, list):
+            complete_alternatives = [ab for ab in alternative_antibiotics if ab.get('is_complete', False)]
+            incomplete_alternatives = [ab for ab in alternative_antibiotics if not ab.get('is_complete', False)]
+            
+            if len(complete_alternatives) >= 5:
+                logger.info(f"Found {len(complete_alternatives)} complete alternative_antibiotic entries (>= 5), removing {len(incomplete_alternatives)} incomplete ones")
+                # Keep only complete ones
+                therapy_plan['alternative_antibiotic'] = complete_alternatives
+                for ab in incomplete_alternatives:
+                    ab_name = ab.get('medical_name', 'unknown')
+                    logger.info(f"Removed incomplete {ab_name} from alternative_antibiotic (already have 5+ complete)")
+            else:
+                logger.info(f"Found {len(complete_alternatives)} complete alternative_antibiotic entries (< 5), keeping {len(incomplete_alternatives)} incomplete ones")
         
         logger.info("Enrichment complete")
         return {'result': result}
@@ -1076,4 +1161,3 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error in enrichment_node: {e}", exc_info=True)
         raise
-

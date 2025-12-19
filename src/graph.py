@@ -49,15 +49,15 @@ def create_pipeline_graph() -> StateGraph:
     workflow.add_node("icd_transform", icd_transform_node)
     workflow.add_node("enrichment", enrichment_node)
     
-    # Define edges
-    workflow.set_entry_point("search")
+    # Define edges - ICD transform runs first
+    workflow.set_entry_point("icd_transform")
+    workflow.add_edge("icd_transform", "search")
     workflow.add_edge("search", "extract")
     workflow.add_edge("extract", "parse")
     workflow.add_edge("parse", "rank")  # Rank not_known entries
     workflow.add_edge("rank", "synthesize")  # Then synthesize with clean categories
-    workflow.add_edge("synthesize", "icd_transform")  # Transform ICD codes before enrichment
-    workflow.add_edge("icd_transform", "enrichment")  # Enrichment uses ICD code names
-    workflow.add_edge("enrichment", END)
+    workflow.add_edge("synthesize", "enrichment")  # Enrichment processes incomplete records
+    workflow.add_edge("enrichment", END)  # End after enrichment
     
     # Compile graph
     app = workflow.compile()

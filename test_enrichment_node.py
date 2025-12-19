@@ -132,16 +132,17 @@ def count_antibiotics_with_null_fields(therapy_plan: dict) -> dict:
 
 def main():
     """Main test function."""
-    # Path to test JSON file
-    test_json_path = Path(__file__).parent / "output" / "pathogen_info_output_20251216_132344.json"
+    # Path to test JSON file - use test_synthesize_output.json
+    if len(sys.argv) > 1:
+        test_json_path = Path(sys.argv[1])
+    else:
+        test_json_path = Path(__file__).parent / "output" / "test_synthesize_output.json"
     
     if not test_json_path.exists():
         logger.error(f"Test file not found: {test_json_path}")
         logger.info("Please provide the path to the JSON file as an argument")
-        if len(sys.argv) > 1:
-            test_json_path = Path(sys.argv[1])
-        else:
-            sys.exit(1)
+        logger.info(f"Example: python test_enrichment_node.py output/test_synthesize_output.json")
+        sys.exit(1)
     
     logger.info(f"Testing enrichment_node with: {test_json_path}")
     

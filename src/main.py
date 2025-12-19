@@ -79,21 +79,26 @@ def main():
     # Ollama configuration is now handled in each node that needs it
     
     # Get user inputs
-    inputs = {
-        'pathogen_name': 'Enterococcus faecium',
-        'resistant_gene': 'vanA',
-        'pathogen_count': '10^5 CFU/ML',
-        'severity_codes': 'A41.9, B95.3',
-        'age': 45 
-    }
-
     # inputs = {
-    #     'pathogen_name': 'Staphylococcus aureus',
-    #     'resistant_gene': 'mecA',
-    #     'pathogen_count': '10^6 CFU/ML',
-    #     'severity_codes': 'A41.2, B95.6',
-    #     'age': 32
+    #     'pathogen_name': 'Enterococcus faecium',
+    #     'resistant_gene': 'vanA',
+    #     'pathogen_count': '10^5 CFU/ML',
+    #     'severity_codes': 'A41.9, B95.3',
+    #     'age': 45,
+    #     'sample': 'Blood',
+    #     'systemic': True
     # }
+
+    inputs = {
+        'pathogen_name': 'Staphylococcus aureus',
+        'resistant_gene': 'mecA',
+        'pathogen_count': '10^6 CFU/ML',
+        'severity_codes': 'A41.2, B95.6',
+        'age': 32,
+        'sample': 'Blood',
+        'systemic': True
+    
+    }
     
     # Allow override via command-line arguments
     if len(sys.argv) > 1:

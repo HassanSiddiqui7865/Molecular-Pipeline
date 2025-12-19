@@ -13,7 +13,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from schemas import SearchResult, AntibioticTherapyPlan, ResistanceGeneEntry
 
-from utils import format_resistance_genes, format_icd_codes
+from utils import format_resistance_genes, get_icd_names_from_state
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,8 @@ Pathogen: {pathogen_name} ({pathogen_count})
 Resistance: {resistant_gene}
 ICD Codes: {severity_codes}
 Age: {age}
+Sample: {sample}
+Systemic: {systemic}
 
 SOURCE:
 {content}
@@ -122,10 +124,11 @@ def _extract_node_impl(state: Dict[str, Any]) -> Dict[str, Any]:
         # Format resistance genes (handle comma-separated)
         resistant_gene = format_resistance_genes(resistant_gene_raw)
         pathogen_count = input_params.get('pathogen_count', '')
-        severity_codes_raw = input_params.get('severity_codes', '')
-        # Format ICD codes (handle comma-separated)
-        severity_codes = format_icd_codes(severity_codes_raw)
+        # Get ICD names from state (transformed), fallback to codes
+        severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')
+        sample = input_params.get('sample', '')
+        systemic = input_params.get('systemic', True)
         
         source_results = []
         
@@ -142,7 +145,8 @@ def _extract_node_impl(state: Dict[str, Any]) -> Dict[str, Any]:
             # Extract both antibiotic therapy and resistance genes using LangChain
             extraction_result = _extract_combined(
                 source_content, pathogen_name, resistant_gene,
-                pathogen_count, severity_codes, age, result.url, result.title, llm
+                pathogen_count, severity_codes, age, sample, systemic,
+                result.url, result.title, llm
             )
             
             # Extract results
@@ -225,6 +229,8 @@ def _extract_combined(
     pathogen_count: str,
     severity_codes: str,
     age: Optional[int],
+    sample: str,
+    systemic: bool,
     source_url: str,
     source_title: str,
     llm: BaseChatModel
@@ -239,6 +245,8 @@ def _extract_combined(
         pathogen_count=pathogen_count,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
+        sample=sample if sample else 'Not specified',
+        systemic='Yes' if systemic else 'No',
         content=content
     )
     

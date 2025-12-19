@@ -155,21 +155,42 @@ def _get_ssh_tunnel(db_config: Dict[str, Any]):
         # Load SSH key if provided
         pkey = None
         if db_config.get('ssh_key_path'):
-            ssh_key_path = db_config['ssh_key_path']
-            key_errors = []
+            from pathlib import Path
+            ssh_key_path_str = db_config['ssh_key_path']
+            ssh_key_path = Path(ssh_key_path_str)
+            ssh_key_passphrase = db_config.get('ssh_key_passphrase', '')
             
-            # Try different key types (in order of preference)
-            for key_class in [paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey]:
-                try:
-                    pkey = key_class.from_private_key_file(ssh_key_path)
-                    break
-                except Exception as e:
-                    key_errors.append(f"{key_class.__name__}: {e}")
+            # If no explicit passphrase is set, use SSH password as passphrase
+            if not ssh_key_passphrase and db_config.get('ssh_password'):
+                ssh_key_passphrase = db_config.get('ssh_password')
             
-            if not pkey:
-                if db_config.get('ssh_password'):
-                    logger.warning(f"Could not load SSH key. Errors: {', '.join(key_errors)}. Using password authentication.")
-                else:
+            # If path doesn't exist, try looking for "key" in project root
+            if not ssh_key_path.exists():
+                project_root = Path(__file__).parent.parent.parent
+                potential_key = project_root / 'key'
+                if potential_key.exists() and potential_key.is_file():
+                    ssh_key_path = potential_key
+            
+            # Try different key types
+            if ssh_key_path.exists() and ssh_key_path.is_file():
+                key_errors = []
+                for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
+                    try:
+                        try:
+                            pkey = key_class.from_private_key_file(str(ssh_key_path))
+                            break
+                        except paramiko.ssh_exception.PasswordRequiredException:
+                            if ssh_key_passphrase:
+                                pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_key_passphrase)
+                                break
+                            else:
+                                raise
+                    except paramiko.ssh_exception.PasswordRequiredException:
+                        key_errors.append(f"{key_class.__name__}: requires passphrase")
+                    except Exception as e:
+                        key_errors.append(f"{key_class.__name__}: {e}")
+                
+                if not pkey and not db_config.get('ssh_password'):
                     raise ValueError(f"Could not load SSH key. Tried: {', '.join(key_errors)}")
         
         # Connect to SSH server
@@ -305,8 +326,8 @@ def _get_icd_code_from_database(code: str, db_config: Dict[str, Any]) -> Optiona
                         logger.debug(f"No disease_id found for ICD code {code}")
                         return None
                     
-                    # Step 2: Query diseases table to get disease name
-                    query2 = 'SELECT * FROM diseases WHERE id = %s LIMIT 1'
+                    # Step 2: Query dev.diseases table to get disease name
+                    query2 = 'SELECT * FROM dev.diseases WHERE id = %s LIMIT 1'
                     
                     cursor.execute(query2, (disease_id,))
                     result2 = cursor.fetchone()

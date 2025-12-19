@@ -114,6 +114,8 @@ def extract_input_from_cache(cache_file: str) -> Dict[str, Any]:
         input_params.setdefault('pathogen_count', '10^5 CFU/ML')
         input_params.setdefault('severity_codes', 'A41.9, B95.3')
         input_params.setdefault('age', 45)
+        input_params.setdefault('sample', 'Blood')
+        input_params.setdefault('systemic', True)
         
         logger.info(f"Extracted input parameters from cache:")
         logger.info(f"  - Pathogen: {input_params['pathogen_name']}")
@@ -287,7 +289,9 @@ def main():
         'resistant_gene': 'vanA',
         'pathogen_count': '10^5 CFU/ML',
         'severity_codes': 'A41.9, B95.3',
-        'age': 45
+        'age': 45,
+        'sample': 'Blood',
+        'systemic': True
     }
     
     # Parse command line arguments

@@ -130,3 +130,28 @@ def format_icd_codes(severity_codes: Optional[str]) -> str:
         # Format as "code1, code2, and code3"
         return ", ".join(codes[:-1]) + f", and {codes[-1]}"
 
+
+def get_icd_names_from_state(state: dict) -> str:
+    """
+    Get transformed ICD code names from state, falling back to codes if not available.
+    
+    Args:
+        state: Pipeline state dictionary
+        
+    Returns:
+        ICD code names (or codes if names not available)
+    """
+    icd_transformation = state.get('icd_transformation', {})
+    severity_codes_transformed = icd_transformation.get('severity_codes_transformed', '')
+    
+    if severity_codes_transformed:
+        return severity_codes_transformed
+    
+    # Fallback to original codes
+    input_params = state.get('input_parameters', {})
+    severity_codes_raw = input_params.get('severity_codes', '')
+    if severity_codes_raw:
+        return format_icd_codes(severity_codes_raw)
+    
+    return "not specified"
+

@@ -54,6 +54,8 @@ class InputParameters(BaseModel):
     pathogen_count: str = Field(..., description="Pathogen count (e.g., '10^5 CFU/ML')")
     severity_codes: str = Field(..., description="Severity codes (e.g., 'A41.9, B95.62')")
     age: Optional[int] = Field(None, description="Patient age in years (e.g., 45, 30, 65)")
+    sample: Optional[str] = Field(None, description="Type of sample (e.g., 'Blood', 'Wound', 'Urine', 'Sputum', etc.)")
+    systemic: Optional[bool] = Field(None, description="Whether the antibiotic treatment should be systemic (affects whole body via bloodstream)")
 
 
 # Note: PipelineState is defined in graph.py as TypedDict for LangGraph compatibility
