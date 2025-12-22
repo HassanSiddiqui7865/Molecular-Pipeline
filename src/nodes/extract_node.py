@@ -20,75 +20,56 @@ logger = logging.getLogger(__name__)
 
 COMBINED_EXTRACTION_PROMPT = """Extract antibiotic information for {pathogen_name} with {resistant_gene} resistance.
 
-PATIENT CONTEXT:
-Pathogen: {pathogen_name} ({pathogen_count})
-Resistance: {resistant_gene}
-ICD Codes: {severity_codes}
-Age: {age}
-Sample: {sample}
-Systemic: {systemic}
+PATIENT: Pathogen={pathogen_name} ({pathogen_count}) | Resistance={resistant_gene} | ICD={severity_codes} | Age={age} | Sample={sample} | Systemic={systemic}
 
 SOURCE:
 {content}
 
----
+SELECTION:
+- Extract antibiotics effective against {pathogen_name} with {resistant_gene}
+- Match severity to ICD: {severity_codes}
+- Consolidate duplicates unless clinically distinct
 
-RULES:
+COMBINATIONS:
+- Identify: "Drug1 and Drug2", "Drug1/Drug2", "Drug1-Drug2", hyphenated names
+- Normalize to: "Drug1 plus Drug2" (lowercase "plus", title case)
+- Examples: "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole"
+- Set is_combined=True for ANY combination
 
-1. SELECTION:
-   - Extract antibiotics explicitly effective against {pathogen_name} with {resistant_gene}
-   - Match severity to ICD codes: {severity_codes}
-   - Consolidate duplicates unless clinically distinct (different doses/indications)
+CATEGORIES (only if explicitly stated):
+- first_choice: "first-line", "preferred", "recommended", "primary"
+- second_choice: "alternative", "second-line", "backup"
+- alternative_antibiotic: "salvage", "last resort"
+- not_known: Effective but category not stated
 
-2. COMBINATIONS:
-   - Identify combinations from: "Drug1 and Drug2", "Drug1 with Drug2", "Drug1/Drug2", "Drug1-Drug2", hyphenated names (e.g., "Quinupristin-dalfopristin")
-   - Format: ALWAYS normalize to "Drug1 plus Drug2" format (lowercase "plus", title case drug names)
-   - Examples: "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole" | "Ampicillin and Gentamicin" → "Ampicillin plus Gentamicin"
-   - Set is_combined = True for ANY combination (hyphenated, slash, "plus", or explicit "and/with")
+FIELDS:
+- medical_name: Title case, no dosage/brand/route/salts. Normalize combinations to "Drug1 plus Drug2"
+  Examples: "vancomycin 1g IV" → "Vancomycin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole"
+- is_combined: True if name contains "plus" after normalization, else False
+- coverage_for: Specific indication (e.g., "MRSA bacteremia")
+- route_of_administration: "IV", "PO", "IM", "IV/PO", "Oral" (null if not mentioned)
+- dose_duration: "dose,route,frequency,duration" (comma-separated)
+  * Single: "600 mg,PO,q12h,7 days"
+  * Combinations: "Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2" (pipe-separated)
+  * Loading doses: Use maintenance only
+  * Missing: Use "null" for missing components
+  * Examples: "600 mg,PO,q12h,7 days" | "Ampicillin:2g,IV,q4h,14 days|Gentamicin:1mg/kg,IV,q8h,14 days"
+- renal_adjustment: "Adjust dose for CrCl < X mL/min" or similar (null if not mentioned)
+- general_considerations: Synthesize clinical notes concisely (null if none)
 
-3. CATEGORIES (only if explicitly stated):
-   - first_choice: "first-line", "preferred", "recommended", "primary"
-   - second_choice: "alternative", "second-line", "backup"
-   - alternative_antibiotic: "salvage", "last resort"
-   - not_known: Mentioned as effective but category not stated
-
-4. FIELDS:
-
-   medical_name: Title case, no dosage/brand/route/salts. ALWAYS normalize combinations to "Drug1 plus Drug2" format.
-   Examples: "vancomycin 1g IV" → "Vancomycin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole" | "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin" | "Ampicillin and Gentamicin" → "Ampicillin plus Gentamicin"
-
-   is_combined: True if therapies are combined (name contains "plus" after normalization), False otherwise
-
-   coverage_for: Specific indication (e.g., "MRSA bacteremia")
-
-   route_of_administration: "IV", "PO", "IM", "IV/PO", "Oral" (null if not mentioned)
-
-   dose_duration: Always comma-separated "dose,route,frequency,duration"
-   - Single: "600 mg,PO,q12h,7 days"
-   - Combinations: Include all mentioned dosages. Format: "Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2" (pipe-separated with drug names)
-   - If both combined and individual mentioned: "combined:dose,route,freq,dur|Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2"
-   - Loading doses: Use maintenance only (ignore loading, use regular dose)
-   - Components: dose (amount only), route (IV/PO/IM), frequency (q8h/q12h/BID/TID), duration (days/weeks)
-   - Missing: Use "null" for any missing component
-   - Examples: "600 mg,PO,q12h,7 days" | "Ampicillin:2g,IV,q4h,14 days|Gentamicin:1mg/kg,IV,q8h,14 days" | "null,null,null,null"
-
-   renal_adjustment: "Adjust dose for CrCl < X mL/min" or similar (null if not mentioned)
-
-   general_considerations: Synthesize clinical notes concisely (null if none)
-
-5. RESISTANCE GENES (for each from {resistant_gene}):
-   - detected_resistant_gene_name: Gene name (e.g., "mecA")
-   - potential_medication_class_affected: Affected classes
-   - general_considerations: Mechanism and impact (null if none)
+RESISTANCE GENES (for each from {resistant_gene}):
+- detected_resistant_gene_name: Gene name (e.g., "mecA")
+- potential_medication_class_affected: Affected classes
+- general_considerations: Mechanism and impact (null if none)
 
 VALIDATION:
 - Each antibiotic in ONE category only
-- medical_name: ALWAYS normalize combinations to "Drug1 plus Drug2" format (never keep hyphen/slash format)
-- is_combined = True if name contains "plus" (after normalization) or original had: hyphen (-), slash (/), "plus", or explicit "and/with"
+- medical_name: ALWAYS normalize combinations (never keep hyphen/slash)
+- is_combined: True if hyphen (-), slash (/), "plus", or explicit "and/with" in original
 - NEVER extract genes (mecA, vanA) as antibiotics
-- dose_duration: Always comma-separated, include all mentioned dosages for combinations
+- dose_duration: Always comma-separated, include all dosages for combinations
 - Loading doses: Use maintenance only
-- No verbatim copying - synthesize intelligently
+- Synthesize intelligently (no verbatim copying)
 
 EXCLUDE:
 - Genes as antibiotics

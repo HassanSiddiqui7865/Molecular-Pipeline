@@ -247,14 +247,14 @@ def _validate_antibiotic_match(
         
         structured_llm = llm.with_structured_output(AntibioticMatchResult)
         
-        prompt = f"""Is this drugs.com page about the same drug we're searching for?
+        prompt = f"""Validate if drugs.com page matches the antibiotic we're searching for.
 
 SEARCHING FOR: {antibiotic_name}
 PAGE TITLE: {page_title}
 
-Question: Is this medically the same drug or not?
+TASK: Determine if page title indicates the same drug (same active ingredient/medically equivalent).
 
-Answer: Return is_match=True only if the page title indicates this is the same drug (same active ingredient/medically equivalent). Return is_match=False if it's a different drug."""
+Return is_match=True if same drug, is_match=False if different drug."""
         
         result = structured_llm.invoke(prompt)
         
@@ -572,18 +572,14 @@ def _extract_fields_with_langchain_memory(
             try:
                 logger.debug(f"[LangChain+Memory] Processing chunk {i+1}/{len(chunks)} for {medical_name}")
                 
-                prompt = f"""Extract ONLY the missing fields for {medical_name} from the drugs.com page content.
-Be VERY CAREFUL and ACCURATE - extract dosages that match the specific patient conditions and parameters.
+                prompt = f"""Extract ONLY missing fields for {medical_name} from drugs.com content.
+Be ACCURATE - extract dosages matching patient conditions.
 
-PATIENT CONTEXT (CRITICAL - use these to extract appropriate dosages):
-- Antibiotic Name: {medical_name}
-- Patient Age: {patient_age_str}
-- ICD Code Names (Disease Conditions): {icd_code_names_str}
-- Resistance Gene: {resistance_gene_str}
+PATIENT: Name={medical_name} | Age={patient_age_str} | ICD={icd_code_names_str} | Gene={resistance_gene_str}
 
-MISSING FIELDS TO EXTRACT (extract ONLY these): {missing_fields_str}
+MISSING FIELDS (extract ONLY these): {missing_fields_str}
 
-EXISTING DATA (use as context, do NOT extract these):
+EXISTING DATA (context only, do NOT extract):
 {existing_data_context}
 
 PREVIOUS CHUNK CONTEXTS:
@@ -592,61 +588,47 @@ PREVIOUS CHUNK CONTEXTS:
 PAGE CONTENT (chunk {i+1} of {len(chunks)}):
 {chunk}
 
-CRITICAL DOSAGE EXTRACTION RULES:
-1. Extract dosages that are SPECIFICALLY appropriate for the ICD Code Names: {icd_code_names_str}
-2. Consider the Resistance Gene: {resistance_gene_str} when selecting dosage
-3. Consider Patient Age: {patient_age_str} when selecting dosage (pediatric vs adult dosing)
-4. DO NOT extract duplicate or conflicting dosages - if you see multiple similar dosages, choose the ONE most appropriate for the conditions
-5. DO NOT include loading doses - only maintenance doses
-6. If the page shows different dosages for different conditions, extract ONLY the dosage(s) relevant to: {icd_code_names_str}
+DOSAGE EXTRACTION RULES:
+1. Extract dosages SPECIFICALLY appropriate for ICD: {icd_code_names_str}
+2. Consider Resistance Gene: {resistance_gene_str}
+3. Consider Patient Age: {patient_age_str} (pediatric vs adult)
+4. DO NOT extract duplicates - choose ONE most appropriate
+5. DO NOT include loading doses - only maintenance
+6. Extract ONLY dosage(s) relevant to ICD: {icd_code_names_str}
 7. Frequency MUST include "q" prefix: q8h, q12h, q24h (NEVER just 8h, 12h, 24h)
-8. Be precise - do not create variations or duplicates
+8. Be precise - no variations or duplicates
 
-DATA INTEROPERABILITY RULES:
-- Use existing filled fields as context to guide extraction of missing fields
-- Extracted missing fields must be medically consistent with existing fields
-- All fields must work together logically - no contradictions
+CONSISTENCY:
+- Use existing fields as context
+- Extracted fields must be medically consistent
+- All fields must work together logically
 
 INSTRUCTIONS:
 1. Extract ONLY fields in missing_fields: {missing_fields_str}
-2. For fields NOT in missing_fields, return the existing value exactly (do not extract)
-3. When extracting dose_duration, carefully match it to ICD Code Names: {icd_code_names_str}
-4. When extracting dose_duration, consider Resistance Gene: {resistance_gene_str}
-5. When extracting dose_duration, consider Patient Age: {patient_age_str}
-6. Maintain consistency with previous chunk contexts
+2. Return existing values for fields NOT in missing_fields
+3. Match dose_duration to ICD: {icd_code_names_str}, Gene: {resistance_gene_str}, Age: {patient_age_str}
+4. Maintain consistency with previous chunk contexts
 
 FIELD DESCRIPTIONS (extract ONLY if in missing_fields):
-- dose_duration: Dosing information in format 'dose,route,frequency,duration'. 
-  * MUST match the ICD Code Names: {icd_code_names_str}
-  * MUST consider Resistance Gene: {resistance_gene_str}
-  * MUST consider Patient Age: {patient_age_str}
-  * Frequency MUST include "q" prefix (q8h, q12h, q24h). 
-  * DO NOT include loading doses - only maintenance doses.
-  * DO NOT create duplicates - if multiple similar dosages exist, choose ONE most appropriate.
-  * If truly different dosages for different conditions (and both are in ICD codes), use pipe separator.
+- dose_duration: 'dose,route,frequency,duration'
+  * Match ICD: {icd_code_names_str}, Gene: {resistance_gene_str}, Age: {patient_age_str}
+  * Frequency MUST include "q" prefix (q8h, q12h, q24h)
+  * NO loading doses - only maintenance
+  * NO duplicates - choose ONE most appropriate
+  * Multiple conditions: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2" (pipe-separated)
   * Examples: "600 mg,IV,q12h,14 days" or "500 mg,PO,q8h,7 days|600 mg,IV,q12h,14 days"
-  
-- route_of_administration: Route of administration. Must be one of: 'IV', 'PO', 'IM', 'IV/PO'.
-  Examples: "IV", "PO", "IV/PO"
-  
-- general_considerations: Clinical notes and considerations. 
-  * If dose_duration contains multiple dosages (separated by |), mention which condition from ICD codes each dosage is for.
-  * Examples: "Monitor renal function, risk of nephrotoxicity" or "For bacteremia: 600 mg IV q12h. For pneumonia: 500 mg PO q8h. Monitor renal function."
-  
-- coverage_for: Conditions or infections this antibiotic covers. Should align with ICD Code Names: {icd_code_names_str}
-  Examples: "MRSA bacteremia, MRSA endocarditis" or "Sepsis due to Staphylococcus aureus, Community-acquired pneumonia"
-  
-- renal_adjustment: Renal adjustment or dosing guidelines for patients with renal impairment.
-  * Be concise and factual - NO repetition, NO references, NO citations.
-  * Extract only the essential adjustment information.
-  * Examples: "Adjust dose in CrCl < 30 mL/min" or "No adjustment needed" or "Reduce dose by 50% in CrCl < 30 mL/min"
+- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO'
+- general_considerations: Clinical notes. If multiple dosages, mention which ICD condition each is for
+- coverage_for: Conditions matching ICD: {icd_code_names_str}
+- renal_adjustment: Concise adjustment info (NO repetition/references/citations)
+  Examples: "Adjust dose in CrCl < 30 mL/min" or "No adjustment needed"
 
-CRITICAL: 
-- Extract ONLY missing fields - return existing values for all other fields
-- Use ICD Code Names, Resistance Gene, and Patient Age to extract ACCURATE dosages
-- DO NOT create duplicate or conflicting dosages
-- DO NOT include loading doses
-- Be precise and careful - accuracy is more important than completeness"""
+CRITICAL:
+- Extract ONLY missing fields - return existing for others
+- Use ICD, Gene, Age for ACCURATE dosages
+- NO duplicates or conflicting dosages
+- NO loading doses
+- Accuracy > completeness"""
                 
                 result = structured_llm.invoke(prompt)
                 
@@ -977,7 +959,9 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     antibiotic.get('medical_name') is not None and
                     antibiotic.get('coverage_for') is not None and
                     antibiotic.get('dose_duration') is not None and
-                    antibiotic.get('route_of_administration') is not None
+                    antibiotic.get('route_of_administration') is not None and
+                    antibiotic.get('renal_adjustment') is not None and
+                    antibiotic.get('general_considerations') is not None
                 )
                 
                 # For first_choice and second_choice: if no required fields were extracted, remove it
@@ -1092,7 +1076,9 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 antibiotic.get('medical_name') is not None and
                                 antibiotic.get('coverage_for') is not None and
                                 antibiotic.get('dose_duration') is not None and
-                                antibiotic.get('route_of_administration') is not None
+                                antibiotic.get('route_of_administration') is not None and
+                                antibiotic.get('renal_adjustment') is not None and
+                                antibiotic.get('general_considerations') is not None
                             )
                             
                             processed_indices.add(idx)

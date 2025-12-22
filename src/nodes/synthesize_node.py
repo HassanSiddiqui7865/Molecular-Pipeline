@@ -101,27 +101,26 @@ def _unify_all_antibiotic_fields_with_llm(
     
     antibiotics_list = "\n\n".join(antibiotics_text)
     
-    prompt = f"""Synthesize fields for multiple antibiotics from multiple sources.
+    prompt = f"""Unify antibiotic fields from multiple sources.
 
-ANTIBIOTICS DATA:
+DATA:
 {antibiotics_list}
 
-INSTRUCTIONS:
-1. For each antibiotic, synthesize BEST information from all sources
-2. If field is null in one source but has data in another, use the data
-3. If multiple sources have different values, choose most comprehensive/accurate
-4. Combine information when appropriate (e.g., combine general_considerations)
-5. If field is null in ALL sources, keep as null
-6. Avoid randomness - choose most clinically relevant
+RULES:
+- Synthesize best information from all sources
+- If null in one source but present in another, use the data
+- If multiple values exist, choose most comprehensive/accurate
+- Combine general_considerations when appropriate
+- If null in ALL sources, return null (not string "null")
 
-OUTPUT FIELDS (for each antibiotic):
-- coverage_for: Specific indication/condition (e.g., "VRE bacteremia")
+OUTPUT (per antibiotic):
+- coverage_for: Specific indication (e.g., "VRE bacteremia")
 - route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
-- dose_duration: 'dose,route,frequency,duration' format or null
+- dose_duration: 'dose,route,frequency,duration' or null
 - renal_adjustment: Dose adjustment guidance or null
 - general_considerations: Combined clinical notes or null
 
-Return unified fields for ALL antibiotics. Use null (not strings) for missing information."""
+Return unified fields for ALL antibiotics."""
 
     try:
         from pydantic import BaseModel, Field
@@ -242,23 +241,22 @@ def _rank_all_antibiotics_with_llm(
     
     prompt = f"""Rank antibiotics for {resistant_gene} resistance.
 
-PATIENT: Resistance: {resistant_gene} | ICD: {severity_codes}
+PATIENT: Resistance={resistant_gene} | ICD={severity_codes}
 
 ANTIBIOTICS:
 {antibiotics_list}
 
-TASK: Determine FINAL category for each antibiotic:
+CATEGORIES:
 - first_choice: Best/preferred option
-- second_choice: Good alternative
+- second_choice: Good alternative  
 - alternative_antibiotic: Other viable option
 
-RULES:
-1. Consider category distribution (mostly first_choice → first_choice)
-2. Medical guidelines for {resistant_gene} resistance
-3. Clinical appropriateness for condition
-4. ICD codes ({severity_codes}) - prioritize appropriate antibiotics
+RANKING FACTORS:
+1. Category distribution (mostly first_choice → first_choice)
+2. Medical guidelines for {resistant_gene}
+3. Clinical appropriateness for ICD: {severity_codes}
 
-Return category for ALL antibiotics."""
+Return final_category for ALL antibiotics."""
     
     try:
         from pydantic import BaseModel, Field
@@ -428,75 +426,45 @@ def _unify_all_with_llm(
 
 PATIENT: {patient_context}
 
-ANTIBIOTICS FROM MULTIPLE SOURCES:
+ANTIBIOTICS FROM SOURCES:
 {antibiotics_list}
 
-TASK: Group medically equivalent antibiotics and unify their data.
+PROCESS:
+1. GROUP: Identify same antibiotics across sources → ONE unified entry with standard name
+2. UNIFY: Combine information, keep only data relevant to patient parameters
+3. DOSAGE: Select ONE optimal dose_duration from sources matching patient parameters
+4. RANK: Determine final_category (first_choice/second_choice/alternative_antibiotic)
+5. COMPLETENESS: Mark is_complete=True if ALL critical fields are non-null
 
-STEP 1 - GROUP: Identify same antibiotics across sources. Group as ONE unified entry. Use standard name.
+CRITICAL FIELDS (all required for is_complete=True):
+- medical_name, coverage_for, dose_duration, route_of_administration, renal_adjustment, general_considerations
 
-STEP 2 - UNIFY: For each group, combine information from all sources. Keep only data relevant to patient parameters:
-- coverage_for: Keep only indications that match patient condition (ICD: {severity_codes}). Do not combine all - filter to match use case.
-- dose_duration: Select dosage that matches patient parameters (ICD: {severity_codes}, Gene: {resistant_gene}, Age: {age if age else 'N/A'})
-- Fill missing fields from other sources in group, but keep them relevant to patient parameters
+FIELD RULES:
+- coverage_for: Keep only indications matching ICD: {severity_codes} (don't combine all)
+- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
+- dose_duration: 
+  * Use ONLY dosages from sources matching ICD: {severity_codes}, Gene: {resistant_gene}, Age: {age if age else 'N/A'}
+  * Format: "dose,route,frequency,duration" (comma-separated)
+  * Multiple conditions: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2" (pipe-separated)
+  * DO NOT invent or combine unrelated dosages
+  * If null in sources, return null
+{f"  * Sample type: Prioritize dosages for \"{sample}\" samples" if sample else ""}
+{f"  * Systemic: Prefer IV/PO/IM for systemic treatment" if systemic is not None else ""}
+- renal_adjustment: Combine all. Format: "Adjust dose in CrCl < X mL/min". Default: 'No adjustment needed' if not mentioned
+- general_considerations: Combine all clinical notes. Default: 'Standard monitoring recommended' if not mentioned
 
-STEP 3 - DOSAGE: Select ONE optimal dose_duration from provided sources that matches patient parameters:
-- Use ONLY dosages shown in source data above
-- MUST match patient condition (ICD: {severity_codes})
-- MUST consider resistance gene: {resistant_gene}
-- MUST consider patient age: {age if age else 'N/A'}
-- DO NOT invent, create, or hallucinate dosages
-- DO NOT combine unrelated dosages - choose the one most appropriate for patient
-- If source shows null/empty/"not specified", return null
-{f"- Consider sample type: For \"{sample}\" samples, prioritize dosages appropriate for that sample type" if sample else ""}
-{f"- Consider systemic: For systemic treatment, prefer IV/PO/IM routes. For local/topical treatment, prefer local routes" if systemic is not None else ""}
-- Single: "dose,route,freq,dur" format
-- If multiple dosages exist for different conditions (both in patient ICD codes), use pipe: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2"
-- If multiple exist, select most appropriate for patient parameters
-- If ALL sources have null, return null
+RANKING:
+- Consider category distribution, medical guidelines for {resistant_gene}, clinical appropriateness for ICD: {severity_codes}
 
-STEP 4 - RANK: Determine final_category based on category distribution, medical guidelines, and clinical appropriateness.
-
-STEP 5 - COMPLETENESS: Determine if the record is fully complete. A record is considered COMPLETE if ALL of these critical fields are non-null:
-- medical_name (always required)
-- coverage_for (required for prescribing)
-- dose_duration (required for prescribing)
-- route_of_administration (required for prescribing)
-
-Optional fields (renal_adjustment, general_considerations) can be null and the record can still be complete.
-Mark is_complete as True only if ALL critical fields are present and non-null.
-
-OUTPUT for each unified antibiotic:
+OUTPUT (per antibiotic):
 - medical_name: Standard name
 - final_category: 'first_choice', 'second_choice', or 'alternative_antibiotic'
-- coverage_for: Coverage indication relevant to patient condition
-- route_of_administration: Unified route ('IV', 'PO', 'IM', 'IV/PO', or null)
-- dose_duration: ONE optimal dosage from sources that matches patient parameters
-- renal_adjustment: Unified renal adjustment (combine all, or null)
-- general_considerations: Unified considerations (combine all, or null)
-- is_complete: Boolean - True if medical_name, coverage_for, dose_duration, and route_of_administration are ALL non-null. False otherwise.
-
-FIELD FORMATS:
-- coverage_for: Keep only indications relevant to patient condition ({severity_codes}). Do not combine all - keep only what matches the use case.
-- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO'. If multiple, use 'IV/PO'. If not mentioned, null.
-- dose_duration: 
-  * Use ONLY dosages from provided sources that match patient parameters (ICD: {severity_codes}, Gene: {resistant_gene}, Age: {age if age else 'N/A'})
-  * DO NOT invent or combine unrelated dosages
-  * Single: "dose,route,frequency,duration" (comma-separated)
-  * If multiple dosages for different conditions (both in patient ICD codes), use pipe: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2"
-  * If source shows null/empty/"not specified", return null
-  * Choose the dosage most appropriate for the patient condition
-- renal_adjustment: Combine all. Format: "Adjust dose in CrCl < X mL/min" or similar. If not mentioned, null.
-- general_considerations: Combine all clinical notes, warnings, monitoring from all sources. If nothing, null.
-
-RULES:
-- Group same antibiotics from different sources
-- Keep only data relevant to patient condition ({severity_codes}), resistance gene ({resistant_gene}), and age ({age if age else 'N/A'})
-- Do not combine all coverage_for - keep only what matches the use case
-- Use ONLY data from provided sources - do not invent
-- Make data complete by filling gaps from other sources in group
-- Return ONE entry per medically unique antibiotic
-- Dosage must match patient parameters - do not combine unrelated dosages
+- coverage_for: Indication matching patient condition
+- route_of_administration: Unified route or null
+- dose_duration: ONE optimal dosage from sources or null
+- renal_adjustment: Combined adjustment info or default
+- general_considerations: Combined notes or default
+- is_complete: True if ALL critical fields non-null, else False
 
 Return ALL unified antibiotics."""
     
@@ -510,7 +478,7 @@ Return ALL unified antibiotics."""
             dose_duration: Optional[str] = Field(None, description="ONE optimal dosage FROM PROVIDED SOURCES ONLY that matches patient parameters (ICD codes, resistance gene, age). DO NOT invent or hallucinate. DO NOT combine unrelated dosages. Single: 'dose,route,freq,dur'. If multiple dosages for different conditions (both in patient ICD codes), use pipe: 'dose1,route1,freq1,dur1|dose2,route2,freq2,dur2'. If sources say null or 'not specified', return null (NOT an invented dosage).")
             renal_adjustment: Optional[str] = Field(None, description="Unified renal adjustment - combine all from all sources in the group")
             general_considerations: Optional[str] = Field(None, description="Unified general considerations - combine all from all sources in the group to make data complete")
-            is_complete: bool = Field(..., description="True if medical_name, coverage_for, dose_duration, and route_of_administration are ALL non-null. False if any of these critical fields is null.")
+            is_complete: bool = Field(..., description="True if medical_name, coverage_for, dose_duration, route_of_administration, renal_adjustment, and general_considerations are ALL non-null. False if any of these critical fields is null.")
         
         class CombinedResult(BaseModel):
             antibiotics: List[RankedAndUnifiedAntibiotic] = Field(..., description="Medically equivalent antibiotics grouped and unified, with complete data from all sources")
@@ -595,7 +563,9 @@ Return ALL unified antibiotics."""
                 final_entry.get('medical_name') is not None and
                 final_entry.get('coverage_for') is not None and
                 final_entry.get('dose_duration') is not None and
-                final_entry.get('route_of_administration') is not None
+                final_entry.get('route_of_administration') is not None and
+                final_entry.get('renal_adjustment') is not None and
+                final_entry.get('general_considerations') is not None
             )
         
         # Add to re-ranked category
@@ -655,32 +625,30 @@ Return ALL unified antibiotics."""
         
         logger.info(f"Preparing resistance genes prompt with {len(resistance_genes_data)} genes")
         
-        resistance_genes_prompt = f"""Synthesize resistance gene information for {pathogen_name} with {resistant_gene} resistance from multiple sources. If multiple resistance genes are specified, synthesize information for each gene separately.
+        resistance_genes_prompt = f"""Synthesize resistance gene information for {pathogen_name} with {resistant_gene} resistance.
 
-RESISTANCE GENES FROM MULTIPLE SOURCES:
+RESISTANCE GENES FROM SOURCES:
 {resistance_genes_list}
 
-TASK: Group same resistance genes across sources and unify their data.
+PROCESS:
+1. GROUP: Identify same genes across sources → ONE unified entry with standard name
+2. UNIFY: Combine information from all sources
 
-STEP 1 - GROUP: Identify same resistance genes across sources. Group as ONE unified entry. Use standard name.
-
-STEP 2 - UNIFY: For each group, combine information from all sources:
-- detected_resistant_gene_name: Standard gene name (e.g., "vanA"). Must match one of the specified resistance genes: {resistant_gene}
-- potential_medication_class_affected: Which antibiotic classes are affected. Combine all classes mentioned from all sources.
-- general_considerations: Combine all information including:
-  * Mechanism of resistance (how it works)
+FIELDS:
+- detected_resistant_gene_name: Standard name (e.g., "vanA"). Must match: {resistant_gene}
+- potential_medication_class_affected: Combine all affected antibiotic classes from all sources
+- general_considerations: Combine all including:
+  * Mechanism of resistance
   * Clinical implications
   * Treatment implications
-  * All clinical notes from all sources
+  * All clinical notes
 
 RULES:
-- Group same resistance genes from different sources
-- Unify by combining all information
-- Use ONLY data from provided sources - do not invent
-- Make data complete by filling gaps from other sources in group
-- Return ONE entry per unique resistance gene
-
-Use null (not strings) for missing information.
+- Group same genes from different sources
+- Use ONLY data from provided sources (do not invent)
+- Fill gaps from other sources in group
+- Return ONE entry per unique gene
+- Use null (not strings) for missing information
 
 Return ALL unified resistance genes."""
         

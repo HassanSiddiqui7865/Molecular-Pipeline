@@ -43,34 +43,59 @@ def test_export_pdf(test_json_path: str = None):
     if 'sample' not in data['input_parameters']:
         data['input_parameters']['sample'] = 'Blood'
     
-    # Add other fields that might be missing for testing
+    # Add medical input parameters from main.py for testing
     input_params = data['input_parameters']
+    if 'pathogen_name' not in input_params:
+        input_params['pathogen_name'] = 'Staphylococcus aureus'
+    if 'resistant_gene' not in input_params:
+        input_params['resistant_gene'] = 'mecA'
+    if 'pathogen_count' not in input_params:
+        input_params['pathogen_count'] = '10^6 CFU/ML'
+    if 'severity_codes' not in input_params:
+        input_params['severity_codes'] = 'A41.2, B95.6'
+    if 'age' not in input_params:
+        input_params['age'] = 32
+    if 'gender' not in input_params:
+        input_params['gender'] = 'Male'
+    
+    # Add other fields that might be missing for testing (all set to "-" except sample)
     if 'facility_name' not in input_params:
-        input_params['facility_name'] = 'Specialists in Dermatology'
+        input_params['facility_name'] = '-'
     if 'provider' not in input_params:
-        input_params['provider'] = 'Susannah Andrews PA-C'
+        input_params['provider'] = '-'
     if 'phone' not in input_params:
-        input_params['phone'] = '(713) 345-1220'
+        input_params['phone'] = '-'
     if 'patient_name' not in input_params:
-        input_params['patient_name'] = 'N/A'  # Redacted in image
+        input_params['patient_name'] = '-'
     if 'patient_dob' not in input_params:
-        input_params['patient_dob'] = '08/15/1952'
+        input_params['patient_dob'] = '-'
     if 'patient_gender' not in input_params:
-        input_params['patient_gender'] = 'Male'
+        input_params['patient_gender'] = '-'
     if 'drug_allergies' not in input_params:
-        input_params['drug_allergies'] = 'NO ALLERGIES PROVIDED'
+        input_params['drug_allergies'] = '-'
     if 'lab_accession' not in input_params:
-        input_params['lab_accession'] = 'EDI2510170004'
+        input_params['lab_accession'] = '-'
     if 'date_collected' not in input_params:
-        input_params['date_collected'] = '10/16/2025'
+        input_params['date_collected'] = '-'
     if 'date_received' not in input_params:
-        input_params['date_received'] = '10/17/2025'
+        input_params['date_received'] = '-'
     if 'date_reported' not in input_params:
-        input_params['date_reported'] = '10/17/2025'
+        input_params['date_reported'] = '-'
     if 'specimen_type' not in input_params:
-        input_params['specimen_type'] = input_params.get('sample', 'Blood')
+        input_params['specimen_type'] = '-'
     if 'specimen_site' not in input_params:
-        input_params['specimen_site'] = 'Left lower leg'
+        input_params['specimen_site'] = '-'
+    
+    # Add ICD transformation data for testing (with code names)
+    if 'icd_transformation' not in data:
+        data['icd_transformation'] = {
+            'original_codes': ['A41.2', 'B95.6'],
+            'code_names': [
+                {'code': 'A41.2', 'name': 'Sepsis, unspecified organism'},
+                {'code': 'B95.6', 'name': 'Staphylococcus aureus as the cause of diseases classified elsewhere'}
+            ],
+            'severity_codes_transformed': 'A41.2 (Sepsis, unspecified organism), B95.6 (Staphylococcus aureus as the cause of diseases classified elsewhere)'
+        }
     
     print("Generating PDF...")
     

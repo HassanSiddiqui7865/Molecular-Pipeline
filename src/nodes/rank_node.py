@@ -118,37 +118,36 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             ranking_prompt = f"""Validate and rank antibiotics for {pathogen_name} with {resistant_gene} resistance.
 
 PATIENT: {patient_context}
-
 SOURCE: {source_title}
 
-ANTIBIOTICS (MUST RANK ALL {len(source_antibiotics)} ANTIBIOTICS):
+ANTIBIOTICS (RANK ALL {len(source_antibiotics)}):
 {antibiotics_list_text}
 
 SOURCE CONTEXT:
 {source_snippet}
 
-DEFINITIONS:
+CATEGORIES:
 - first_choice: Best/preferred for {pathogen_name} with {resistant_gene}, appropriate for condition
 - second_choice: Good alternative, effective against {resistant_gene}
 - alternative_antibiotic: Other viable option
 - remove: NOT useful against {resistant_gene} OR inappropriate
 
-TASK:
-1. Review each antibiotic's coverage_for, dose_duration, route, and other fields from the source
-2. VALIDATE: is_relevant = True if useful against {resistant_gene} AND appropriate for condition/age/ICD codes, else False
-3. RANK: first_choice/second_choice/alternative_antibiotic/remove based on:
+PROCESS:
+1. Review each antibiotic's coverage_for, dose_duration, route, and other fields
+2. VALIDATE: is_relevant=True if useful against {resistant_gene} AND appropriate for condition/age/ICD codes, else False
+3. RANK based on:
    - Effectiveness against {resistant_gene}
-   - Appropriateness for ICD codes: {severity_codes}
+   - Appropriateness for ICD: {severity_codes}
    - Appropriateness for age: {age if age else 'N/A'}
-   - Dosage accuracy and completeness from source
+   - Dosage accuracy and completeness
 4. RULES:
    - Rank "not_known" into proper category
    - Validate existing categories, keep/change/remove as needed
    - Remove if NOT useful or inappropriate
    - Consider ALL fields (coverage, dosage, route) when ranking
-   - CRITICAL: You MUST return a ranking for ALL {len(source_antibiotics)} antibiotics listed above. Do not skip any.
+   - CRITICAL: Return ranking for ALL {len(source_antibiotics)} antibiotics (do not skip any)
 
-Return ALL {len(source_antibiotics)} antibiotics with ranked_category, is_relevant, ranking_reason. Every antibiotic must be included."""
+Return ALL {len(source_antibiotics)} antibiotics with ranked_category, is_relevant, ranking_reason."""
             
             # Use structured output
             structured_llm = llm.with_structured_output(RankedAntibioticsResult)
@@ -222,25 +221,24 @@ Return ALL {len(source_antibiotics)} antibiotics with ranked_category, is_releva
                 
                 unranked_list_text = "\n".join(unranked_text)
                 
-                retry_prompt = f"""Rank these {len(unranked_antibiotics)} antibiotics that were missed in the previous ranking.
+                retry_prompt = f"""Rank these {len(unranked_antibiotics)} antibiotics that were missed.
 
 PATIENT: {patient_context}
-
 SOURCE: {source_title}
 
-MISSED ANTIBIOTICS (MUST RANK ALL):
+MISSED ANTIBIOTICS (RANK ALL):
 {unranked_list_text}
 
 SOURCE CONTEXT:
 {source_snippet}
 
-DEFINITIONS:
+CATEGORIES:
 - first_choice: Best/preferred for {pathogen_name} with {resistant_gene}, appropriate for condition
 - second_choice: Good alternative, effective against {resistant_gene}
 - alternative_antibiotic: Other viable option
 - remove: NOT useful against {resistant_gene} OR inappropriate
 
-TASK: Rank ALL {len(unranked_antibiotics)} antibiotics above. Return ranked_category, is_relevant, ranking_reason for EACH one."""
+TASK: Rank ALL {len(unranked_antibiotics)} antibiotics. Return ranked_category, is_relevant, ranking_reason for EACH one."""
                 
                 try:
                     retry_result = structured_llm.invoke(retry_prompt)
