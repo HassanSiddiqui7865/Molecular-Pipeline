@@ -27,6 +27,7 @@ class PipelineState(TypedDict):
     extraction_date: Optional[str]
     result: Optional[Dict[str, Any]]
     errors: List[str]
+    rank_memory: Optional[Dict[str, Any]]
     metadata: Dict[str, Any]
 
 
@@ -90,6 +91,8 @@ def run_pipeline(
     # Prepare initial state
     initial_state = {
         'input_parameters': input_parameters,
+        'errors': [],
+        'rank_memory': {},
         'metadata': {
             'perplexity_client': perplexity_client,
             'max_search_results': max_search_results,

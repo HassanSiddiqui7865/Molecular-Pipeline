@@ -44,9 +44,16 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.info("No source results to rank")
             return {'rank_memory': rank_memory}
         
-        pathogen_name = input_params.get('pathogen_name', '')
-        resistant_gene_raw = input_params.get('resistant_gene', '')
-        resistant_gene = format_resistance_genes(resistant_gene_raw)
+        # Get pathogens
+        from utils import get_pathogens_from_input, format_pathogens
+        pathogens = get_pathogens_from_input(input_params)
+        pathogen_name = format_pathogens(pathogens)
+        
+        # Get resistance genes
+        from utils import get_resistance_genes_from_input, format_resistance_genes
+        resistant_genes = get_resistance_genes_from_input(input_params)
+        resistant_gene = format_resistance_genes(resistant_genes)
+        
         # Get ICD names from state (transformed), fallback to codes
         severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')

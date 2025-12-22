@@ -163,11 +163,16 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     try:
         input_params = state.get('input_parameters', {})
-        pathogen_name = input_params.get('pathogen_name', '')
-        resistant_gene_raw = input_params.get('resistant_gene', '')
         
-        # Format resistance genes (handle comma-separated)
-        resistant_gene = format_resistance_genes(resistant_gene_raw)
+        # Get pathogens
+        from utils import get_pathogens_from_input, format_pathogens
+        pathogens = get_pathogens_from_input(input_params)
+        pathogen_name = format_pathogens(pathogens)
+        
+        # Get resistance genes
+        from utils import get_resistance_genes_from_input, format_resistance_genes
+        resistant_genes = get_resistance_genes_from_input(input_params)
+        resistant_gene = format_resistance_genes(resistant_genes)
         
         # Get transformed ICD codes if available, otherwise use original
         icd_transformation = state.get('icd_transformation', {})
@@ -175,7 +180,9 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # If transformation failed or not available, use original codes
         if not severity_codes_transformed:
-            severity_codes_transformed = input_params.get('severity_codes', '')
+            from utils import get_severity_codes_from_input, format_icd_codes
+            severity_codes_list = get_severity_codes_from_input(input_params)
+            severity_codes_transformed = format_icd_codes(severity_codes_list)
         
         # Add ICD codes to search query if available
         severity_codes_text = ''

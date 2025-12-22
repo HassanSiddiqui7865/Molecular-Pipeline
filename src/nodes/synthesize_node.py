@@ -318,17 +318,23 @@ def _unify_all_with_llm(
     Returns:
         Dictionary with unified first_choice, second_choice, alternative_antibiotic, and resistance_genes
     """
-    pathogen_name = input_params.get('pathogen_name', 'Unknown')
-    resistant_gene_raw = input_params.get('resistant_gene', 'Unknown')
-    # Format resistance genes (handle comma-separated)
-    resistant_gene = format_resistance_genes(resistant_gene_raw)
+    # Get pathogens
+    from utils import get_pathogens_from_input, format_pathogens
+    pathogens = get_pathogens_from_input(input_params)
+    pathogen_name = format_pathogens(pathogens) if pathogens else 'Unknown'
+    
+    # Get resistance genes
+    from utils import get_resistance_genes_from_input, format_resistance_genes
+    resistant_genes = get_resistance_genes_from_input(input_params)
+    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else 'Unknown'
+    
     # Get ICD names from state (transformed), fallback to codes
     if state:
         severity_codes = get_icd_names_from_state(state)
     else:
-        severity_codes_raw = input_params.get('severity_codes', '')
-        from utils import format_icd_codes
-        severity_codes = format_icd_codes(severity_codes_raw)
+        from utils import get_severity_codes_from_input, format_icd_codes
+        severity_codes_list = get_severity_codes_from_input(input_params)
+        severity_codes = format_icd_codes(severity_codes_list) if severity_codes_list else 'not specified'
     sample = input_params.get('sample', '')
     systemic = input_params.get('systemic', True)
     age = input_params.get('age')
@@ -625,7 +631,16 @@ Return ALL unified antibiotics."""
         
         logger.info(f"Preparing resistance genes prompt with {len(resistance_genes_data)} genes")
         
-        resistance_genes_prompt = f"""Synthesize resistance gene information for {pathogen_name} with {resistant_gene} resistance.
+        # Format resistance genes for prompt context
+        from utils import get_resistance_genes_from_input
+        if state:
+            input_params_for_genes = state.get('input_parameters', {})
+        else:
+            input_params_for_genes = input_params
+        resistant_genes_list_for_prompt = get_resistance_genes_from_input(input_params_for_genes)
+        resistance_genes_context = f" ({', '.join(resistant_genes_list_for_prompt)})" if len(resistant_genes_list_for_prompt) > 1 else ""
+        
+        resistance_genes_prompt = f"""Synthesize resistance gene information for {pathogen_name} with {resistant_gene} resistance{resistance_genes_context}.
 
 RESISTANCE GENES FROM SOURCES:
 {resistance_genes_list}
@@ -635,7 +650,7 @@ PROCESS:
 2. UNIFY: Combine information from all sources
 
 FIELDS:
-- detected_resistant_gene_name: Standard name (e.g., "vanA"). Must match: {resistant_gene}
+- detected_resistant_gene_name: Standard name (e.g., "vanA"). Must match one of: {', '.join(resistant_genes_list_for_prompt) if resistant_genes_list_for_prompt else resistant_gene}
 - potential_medication_class_affected: Combine all affected antibiotic classes from all sources
 - general_considerations: Combine all including:
   * Mechanism of resistance

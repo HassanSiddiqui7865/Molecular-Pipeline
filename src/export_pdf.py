@@ -643,10 +643,13 @@ def _create_input_section(data: Dict[str, Any], styles) -> list:
     
     input_params = data.get('input_parameters', {})
     
-    # Get sample type (default to "WOUND" if not provided)
-    sample = input_params.get('sample', 'WOUND')
+    # Get sample type from state (no default - use what's provided)
+    sample = input_params.get('sample', '')
     if not sample or sample.upper() == 'N/A':
-        sample = 'WOUND'
+        sample = input_params.get('specimen_type', '') or input_params.get('specimen_site', '') or ''
+    # If still empty, use a generic placeholder
+    if not sample:
+        sample = 'SAMPLE'
     
     # Create blue header badge as a Table for padding control
     header_text = Paragraph(
@@ -797,20 +800,18 @@ def _create_input_section(data: Dict[str, Any], styles) -> list:
     ])
     
     # Get medical input parameters
-    pathogen_name = input_params.get('pathogen_name', '-')
-    resistant_gene = input_params.get('resistant_gene', '-')
-    pathogen_count = input_params.get('pathogen_count', '-')
+    from utils import get_pathogens_from_input, format_pathogens, get_resistance_genes_from_input, format_resistance_genes
+    
+    pathogens = get_pathogens_from_input(input_params)
+    pathogen_display = format_pathogens(pathogens) if pathogens else '-'
+    
+    # Get resistance genes
+    resistant_genes = get_resistance_genes_from_input(input_params)
+    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else '-'
+    
     age = input_params.get('age', '-')
     if age and age != '-':
         age = str(age)
-    
-    # Combine pathogen name with count in brackets
-    if pathogen_name and pathogen_name != '-' and pathogen_count and pathogen_count != '-':
-        pathogen_display = f"{pathogen_name} ({pathogen_count})"
-    elif pathogen_name and pathogen_name != '-':
-        pathogen_display = pathogen_name
-    else:
-        pathogen_display = '-'
     
     # Get ICD code names from icd_transformation if available
     from utils import get_icd_names_from_state
@@ -904,94 +905,63 @@ def _create_input_section(data: Dict[str, Any], styles) -> list:
 def _create_negative_sections(data: Dict[str, Any], styles) -> list:
     """
     Create the negative organisms and negative resistance genes sections.
-    Removes pathogen_name and resistant_gene from the respective lists.
+    Gets lists from state and removes pathogen_name and resistant_gene from the respective lists.
     """
     elements = []
     
     input_params = data.get('input_parameters', {})
-    pathogen_name = input_params.get('pathogen_name', '').strip()
-    resistant_gene = input_params.get('resistant_gene', '').strip()
     
-    # Static list of negative organisms tested
-    negative_organisms = [
-        'Acinetobacter baumannii',
-        'Bacteroides fragilis',
-        'Candida glabrata',
-        'Candida albicans',
-        'Candida auris',
-        'Candida krusei',
-        'Candida lusitaniae',
-        'Candida parapsilosis',
-        'Candida tropicalis',
-        'Citrobacter freundii',
-        'Clostridium novyi',
-        'Clostridium perfringens',
-        'Clostridium septicum',
-        'Enterobacter cloacae',
-        'Enterococcus faecium',
-        'Escherichia coli',
-        'Group A strep',
-        'Group B strep',
-        'Group C and G Strep',
-        'Herpes Zoster',
-        'HSV-1 (Herpes Simplex)',
-        'HSV-2 (Herpes Simplex)',
-        'kingella kingae',
-        'Klebsiella aerogenes',
-        'Klebsiella oxytoca',
-        'Klebsiella pneumoniae',
-        'Morganella morganii',
-        'Not an organism',
-        'Proteus mirabilis',
-        'Proteus vulgaris',
-        'Pseudomonas aeruginosa',
-        'Staphylococcus aureus',
-        'Trichophyton spp.'
-    ]
+    # Get pathogens
+    from utils import get_pathogens_from_input
+    pathogens = get_pathogens_from_input(input_params)
+    # Extract pathogen names for filtering
+    pathogen_names = [p.get('pathogen_name', '').strip() for p in pathogens if p.get('pathogen_name', '').strip()]
     
-    # Static list of negative resistance genes tested
-    negative_resistance_genes = [
-        'ampC',
-        'Ant-2',
-        'Aph 2',
-        'aph3',
-        'CTX-M1',
-        'CTX-M2',
-        'dfrA1',
-        'dfrA5',
-        'Erm B',
-        'ErmA',
-        'femA',
-        'Gyrase A',
-        'KPC',
-        'mefA',
-        'NDM',
-        'OXA-48',
-        'Par C',
-        'QnrA',
-        'QnrB',
-        'SHV',
-        'Sul 2',
-        'Sul1',
-        'TEM',
-        'Tet O',
-        'tetB',
-        'vanA1',
-        'vanA2',
-        'VanB'
-    ]
+    # Get resistance genes
+    from utils import get_resistance_genes_from_input
+    resistant_genes = get_resistance_genes_from_input(input_params)
     
-    # Remove pathogen_name from negative organisms (case-insensitive)
-    if pathogen_name:
+    # Get negative organisms from state (check multiple possible locations)
+    negative_organisms = []
+    if 'negative_organisms' in data:
+        negative_organisms = data.get('negative_organisms', [])
+    elif 'result' in data and isinstance(data.get('result'), dict):
+        negative_organisms = data['result'].get('negative_organisms', [])
+    elif 'metadata' in data and isinstance(data.get('metadata'), dict):
+        negative_organisms = data['metadata'].get('negative_organisms', [])
+    
+    # Ensure it's a list
+    if not isinstance(negative_organisms, list):
+        negative_organisms = []
+    
+    # Get negative resistance genes from state (check multiple possible locations)
+    negative_resistance_genes = []
+    if 'negative_resistance_genes' in data:
+        negative_resistance_genes = data.get('negative_resistance_genes', [])
+    elif 'result' in data and isinstance(data.get('result'), dict):
+        negative_resistance_genes = data['result'].get('negative_resistance_genes', [])
+    elif 'metadata' in data and isinstance(data.get('metadata'), dict):
+        negative_resistance_genes = data['metadata'].get('negative_resistance_genes', [])
+    
+    # Ensure it's a list
+    if not isinstance(negative_resistance_genes, list):
+        negative_resistance_genes = []
+    
+    # Remove pathogen names from negative organisms (case-insensitive)
+    if pathogen_names and negative_organisms:
+        pathogen_names_lower = [name.lower() for name in pathogen_names]
         negative_organisms = [org for org in negative_organisms 
-                            if org.lower() != pathogen_name.lower()]
+                            if org.lower() not in pathogen_names_lower]
     
-    # Remove resistant_gene from negative resistance genes (case-insensitive)
-    # Handle comma-separated genes
-    if resistant_gene:
-        genes_to_remove = [g.strip() for g in resistant_gene.split(',')]
+    # Remove resistance genes from negative resistance genes (case-insensitive)
+    if resistant_genes and negative_resistance_genes:
+        resistant_genes_lower = [g.lower() for g in resistant_genes]
         negative_resistance_genes = [gene for gene in negative_resistance_genes
-                                   if gene.lower() not in [g.lower() for g in genes_to_remove]]
+                                   if gene.lower() not in resistant_genes_lower]
+    
+    # If no negative organisms or genes, return empty (don't show sections)
+    if not negative_organisms and not negative_resistance_genes:
+        return elements
     
     # Create styles for negative sections
     negative_header_style = ParagraphStyle(
@@ -1015,71 +985,73 @@ def _create_negative_sections(data: Dict[str, Any], styles) -> list:
         spaceAfter=0
     )
     
-    # Section 1: NEGATIVE ORGANISMS TESTED
-    elements.append(Spacer(1, 0.15 * inch))
+    # Section 1: NEGATIVE ORGANISMS TESTED (only if we have organisms)
+    if negative_organisms:
+        elements.append(Spacer(1, 0.15 * inch))
+        
+        # Header
+        org_header_text = Paragraph("NEGATIVE ORGANISMS TESTED", negative_header_style)
+        org_header_table = Table([[org_header_text]], colWidths=[7.5 * inch])
+        org_header_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        elements.append(org_header_table)
+        
+        # Content
+        org_content_text = ', '.join(negative_organisms)
+        org_content = Paragraph(org_content_text, negative_content_style)
+        org_content_table = Table([[org_content]], colWidths=[7.5 * inch])
+        org_content_table.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.5, black),
+            ('BACKGROUND', (0, 0), (-1, -1), white),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(org_content_table)
     
-    # Header
-    org_header_text = Paragraph("NEGATIVE ORGANISMS TESTED", negative_header_style)
-    org_header_table = Table([[org_header_text]], colWidths=[7.5 * inch])
-    org_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    elements.append(org_header_table)
-    
-    # Content
-    org_content_text = ', '.join(negative_organisms)
-    org_content = Paragraph(org_content_text, negative_content_style)
-    org_content_table = Table([[org_content]], colWidths=[7.5 * inch])
-    org_content_table.setStyle(TableStyle([
-        ('BOX', (0, 0), (-1, -1), 0.5, black),
-        ('BACKGROUND', (0, 0), (-1, -1), white),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(org_content_table)
-    
-    # Section 2: NEGATIVE RESISTANCE GENES TESTED
-    elements.append(Spacer(1, 0.15 * inch))
-    
-    # Header
-    gene_header_text = Paragraph("NEGATIVE RESISTANCE GENES TESTED", negative_header_style)
-    gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
-    gene_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    elements.append(gene_header_table)
-    
-    # Content
-    gene_content_text = ', '.join(negative_resistance_genes)
-    gene_content = Paragraph(gene_content_text, negative_content_style)
-    gene_content_table = Table([[gene_content]], colWidths=[7.5 * inch])
-    gene_content_table.setStyle(TableStyle([
-        ('BOX', (0, 0), (-1, -1), 0.5, black),
-        ('BACKGROUND', (0, 0), (-1, -1), white),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(gene_content_table)
+    # Section 2: NEGATIVE RESISTANCE GENES TESTED (only if we have genes)
+    if negative_resistance_genes:
+        elements.append(Spacer(1, 0.15 * inch))
+        
+        # Header
+        gene_header_text = Paragraph("NEGATIVE RESISTANCE GENES TESTED", negative_header_style)
+        gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
+        gene_header_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        elements.append(gene_header_table)
+        
+        # Content
+        gene_content_text = ', '.join(negative_resistance_genes)
+        gene_content = Paragraph(gene_content_text, negative_content_style)
+        gene_content_table = Table([[gene_content]], colWidths=[7.5 * inch])
+        gene_content_table.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.5, black),
+            ('BACKGROUND', (0, 0), (-1, -1), white),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(gene_content_table)
     
     return elements
 

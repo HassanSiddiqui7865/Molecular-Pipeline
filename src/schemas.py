@@ -47,12 +47,17 @@ class SearchResult(BaseModel):
     snippet: str = Field(..., description="Content snippet from the source")
 
 
+class PathogenEntry(BaseModel):
+    """Schema for a single pathogen entry."""
+    pathogen_name: str = Field(..., description="Name of the pathogen")
+    pathogen_count: str = Field(..., description="Pathogen count (e.g., '10^5 CFU/ML')")
+
+
 class InputParameters(BaseModel):
     """Schema for input parameters to the pipeline."""
-    pathogen_name: str = Field(..., description="Name of the pathogen")
-    resistant_gene: str = Field(..., description="Detected resistance gene")
-    pathogen_count: str = Field(..., description="Pathogen count (e.g., '10^5 CFU/ML')")
-    severity_codes: str = Field(..., description="Severity codes (e.g., 'A41.9, B95.62')")
+    pathogens: List[PathogenEntry] = Field(..., description="List of pathogens with their counts")
+    resistant_genes: List[str] = Field(..., description="List of detected resistance genes")
+    severity_codes: List[str] = Field(..., description="List of ICD severity codes (e.g., ['A41.9', 'B95.62'])")
     age: Optional[int] = Field(None, description="Patient age in years (e.g., 45, 30, 65)")
     sample: Optional[str] = Field(None, description="Type of sample (e.g., 'Blood', 'Wound', 'Urine', 'Sputum', etc.)")
     systemic: Optional[bool] = Field(None, description="Whether the antibiotic treatment should be systemic (affects whole body via bloodstream)")

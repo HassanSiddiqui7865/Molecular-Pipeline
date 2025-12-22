@@ -41,7 +41,21 @@ def save_output(data: Dict, output_path: str):
 def get_cache_filename(inputs: Dict) -> Path:
     """Generate cache filename based on input parameters."""
     import hashlib
-    cache_key = f"{inputs.get('pathogen_name', '')}_{inputs.get('resistant_gene', '')}_{inputs.get('pathogen_count', '')}_{inputs.get('severity_codes', '')}"
+    import json
+    
+    # Get pathogens - support both formats
+    from utils import get_pathogens_from_input, get_resistance_genes_from_input, get_severity_codes_from_input
+    
+    pathogens = get_pathogens_from_input(inputs)
+    resistant_genes = get_resistance_genes_from_input(inputs)
+    severity_codes = get_severity_codes_from_input(inputs)
+    
+    # Create cache key from arrays
+    pathogens_str = json.dumps(pathogens, sort_keys=True) if pathogens else ''
+    genes_str = json.dumps(resistant_genes, sort_keys=True) if resistant_genes else ''
+    codes_str = json.dumps(severity_codes, sort_keys=True) if severity_codes else ''
+    
+    cache_key = f"{pathogens_str}_{genes_str}_{codes_str}"
     cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
     return project_root / "output" / f"perplexity_cache_{cache_hash}.json"
 
@@ -78,26 +92,16 @@ def main():
     
     # Ollama configuration is now handled in each node that needs it
     
-    # Get user inputs
-    # inputs = {
-    #     'pathogen_name': 'Enterococcus faecium',
-    #     'resistant_gene': 'vanA',
-    #     'pathogen_count': '10^5 CFU/ML',
-    #     'severity_codes': 'A41.9, B95.3',
-    #     'age': 45,
-    #     'sample': 'Blood',
-    #     'systemic': True
-    # }
-
     inputs = {
-        'pathogen_name': 'Staphylococcus aureus',
-        'resistant_gene': 'mecA',
-        'pathogen_count': '10^6 CFU/ML',
-        'severity_codes': 'A41.2, B95.6',
+        'pathogens': [
+            {'pathogen_name': 'Staphylococcus aureus', 'pathogen_count': '10^3 CFU/ML'},
+            {'pathogen_name': 'Enterococcus faecalis', 'pathogen_count': '10^4 CFU/ML'}
+        ],
+        'resistant_genes': ['mecA', 'tetM','dfrA','Ant-la',],
+        'severity_codes': ['A41.2', 'A41.81'],
         'age': 32,
         'sample': 'Blood',
         'systemic': True
-    
     }
     
     # Allow override via command-line arguments
@@ -128,11 +132,23 @@ def main():
         cache_path=str(cache_path)
     )
     
-    # Prepare final output
+    # Prepare final output - include all state data needed for PDF export
     output_data = {
         'input_parameters': final_state.get('input_parameters', inputs),
         'extraction_date': final_state.get('extraction_date'),
-        'result': final_state.get('result', {})
+        'result': final_state.get('result', {}),
+        'icd_transformation': final_state.get('icd_transformation', {}),
+        # Include negative organisms and genes if available in metadata or result
+        'negative_organisms': (
+            final_state.get('metadata', {}).get('negative_organisms') or
+            final_state.get('result', {}).get('negative_organisms') or
+            []
+        ),
+        'negative_resistance_genes': (
+            final_state.get('metadata', {}).get('negative_resistance_genes') or
+            final_state.get('result', {}).get('negative_resistance_genes') or
+            []
+        )
     }
     
     # Validate output with Pydantic (but preserve result even if validation fails)

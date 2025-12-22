@@ -6,7 +6,7 @@ import logging
 import time
 import socket
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -509,28 +509,33 @@ def _get_icd_code_name(code: str, db_config: Optional[Dict[str, Any]] = None) ->
         return code
 
 
-def _transform_icd_codes(severity_codes: str, db_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _transform_icd_codes(severity_codes: List[str], db_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Transform ICD codes to human-readable names.
     First tries database lookup via SSH, then falls back to scraping icd10data.com.
     
     Args:
-        severity_codes: Comma-separated string of ICD codes (e.g., "A41.9, B95.3")
+        severity_codes: List of ICD codes (e.g., ["A41.9", "B95.3"])
         db_config: Database configuration dictionary (optional)
         
     Returns:
         Dictionary with original codes, transformed names, and combined string
     """
-    if not severity_codes or not severity_codes.strip():
+    if not isinstance(severity_codes, list):
         return {
             'original_codes': [],
             'code_names': [],
             'severity_codes_transformed': ''
         }
     
-    # Split by comma and clean up
-    codes = [code.strip() for code in severity_codes.split(',')]
-    codes = [code for code in codes if code]  # Remove empty strings
+    codes = [str(code).strip().upper() for code in severity_codes if code and str(code).strip()]
+    
+    if not codes:
+        return {
+            'original_codes': [],
+            'code_names': [],
+            'severity_codes_transformed': ''
+        }
     
     # Normalize codes
     normalized_codes = [_normalize_icd_code(code) for code in codes]
@@ -586,9 +591,9 @@ def icd_transform_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     try:
         input_params = state.get('input_parameters', {})
-        severity_codes = input_params.get('severity_codes', '')
+        severity_codes = input_params.get('severity_codes', [])
         
-        if not severity_codes:
+        if not severity_codes or not isinstance(severity_codes, list) or len(severity_codes) == 0:
             logger.warning("No severity codes found in input parameters")
             return {
                 'icd_transformation': {
@@ -622,17 +627,18 @@ def icd_transform_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Error in icd_transform_node: {e}", exc_info=True)
         # Don't halt pipeline - return original codes if transformation fails
         input_params = state.get('input_parameters', {})
-        severity_codes = input_params.get('severity_codes', '')
-        if severity_codes:
-            # Return original codes as fallback
-            codes = [code.strip().upper() for code in severity_codes.split(',') if code.strip()]
-            return {
-                'icd_transformation': {
-                    'original_codes': codes,
-                    'code_names': [{'code': code, 'name': code} for code in codes],
-                    'severity_codes_transformed': severity_codes
+        severity_codes = input_params.get('severity_codes', [])
+        
+        if severity_codes and isinstance(severity_codes, list):
+            codes = [str(code).strip().upper() for code in severity_codes if code and str(code).strip()]
+            if codes:
+                return {
+                    'icd_transformation': {
+                        'original_codes': codes,
+                        'code_names': [{'code': code, 'name': code} for code in codes],
+                        'severity_codes_transformed': ', '.join(codes)
+                    }
                 }
-            }
         return {
             'icd_transformation': {
                 'original_codes': [],

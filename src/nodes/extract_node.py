@@ -18,15 +18,17 @@ from utils import format_resistance_genes, get_icd_names_from_state
 logger = logging.getLogger(__name__)
 
 
-COMBINED_EXTRACTION_PROMPT = """Extract antibiotic information for {pathogen_name} with {resistant_gene} resistance.
+COMBINED_EXTRACTION_PROMPT = """Extract antibiotic information for {pathogen_display} with {resistant_gene} resistance.
 
-PATIENT: Pathogen={pathogen_name} ({pathogen_count}) | Resistance={resistant_gene} | ICD={severity_codes} | Age={age} | Sample={sample} | Systemic={systemic}
+PATIENT: Pathogen={pathogen_display} | Resistance={resistant_gene} | ICD={severity_codes} | Age={age} | Sample={sample} | Systemic={systemic}
+{pathogens_context}
+{resistance_genes_context}
 
 SOURCE:
 {content}
 
 SELECTION:
-- Extract antibiotics effective against {pathogen_name} with {resistant_gene}
+- Extract antibiotics effective against {pathogen_display} with {resistant_gene}
 - Match severity to ICD: {severity_codes}
 - Consolidate duplicates unless clinically distinct
 
@@ -57,7 +59,7 @@ FIELDS:
 - renal_adjustment: "Adjust dose for CrCl < X mL/min" or similar (null if not mentioned)
 - general_considerations: Synthesize clinical notes concisely (null if none)
 
-RESISTANCE GENES (for each from {resistant_gene}):
+RESISTANCE GENES (for each from {resistant_gene}{resistance_genes_context}):
 - detected_resistant_gene_name: Gene name (e.g., "mecA")
 - potential_medication_class_affected: Affected classes
 - general_considerations: Mechanism and impact (null if none)
@@ -100,11 +102,20 @@ def _extract_node_impl(state: Dict[str, Any]) -> Dict[str, Any]:
         from config import get_ollama_llm
         llm = get_ollama_llm()
         
-        pathogen_name = input_params.get('pathogen_name', '')
-        resistant_gene_raw = input_params.get('resistant_gene', '')
-        # Format resistance genes (handle comma-separated)
-        resistant_gene = format_resistance_genes(resistant_gene_raw)
-        pathogen_count = input_params.get('pathogen_count', '')
+        # Get pathogens
+        from utils import get_pathogens_from_input, format_pathogens
+        pathogens = get_pathogens_from_input(input_params)
+        pathogen_display = format_pathogens(pathogens)
+        # For extraction, use first pathogen as primary
+        primary_pathogen = pathogens[0] if pathogens else {}
+        pathogen_name = primary_pathogen.get('pathogen_name', '')
+        pathogen_count = primary_pathogen.get('pathogen_count', '')
+        
+        # Get resistance genes
+        from utils import get_resistance_genes_from_input, format_resistance_genes
+        resistant_genes = get_resistance_genes_from_input(input_params)
+        resistant_gene = format_resistance_genes(resistant_genes)
+        
         # Get ICD names from state (transformed), fallback to codes
         severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')
@@ -124,10 +135,21 @@ def _extract_node_impl(state: Dict[str, Any]) -> Dict[str, Any]:
             source_content = f"Title: {result.title}\nContent: {result.snippet}\n[Unique ID: {unique_id}]"
             
             # Extract both antibiotic therapy and resistance genes using LangChain
+            # Use formatted display for prompts, but pass all pathogens for context
             extraction_result = _extract_combined(
-                source_content, pathogen_name, resistant_gene,
-                pathogen_count, severity_codes, age, sample, systemic,
-                result.url, result.title, llm
+                content=source_content,
+                pathogen_name=pathogen_display,
+                resistant_gene=resistant_gene,
+                pathogen_count=pathogen_count,
+                severity_codes=severity_codes,
+                age=age,
+                sample=sample,
+                systemic=systemic,
+                source_url=result.url,
+                source_title=result.title,
+                llm=llm,
+                pathogens=pathogens,
+                resistant_genes_list=resistant_genes
             )
             
             # Extract results
@@ -214,20 +236,43 @@ def _extract_combined(
     systemic: bool,
     source_url: str,
     source_title: str,
-    llm: BaseChatModel
+    llm: BaseChatModel,
+    pathogens: Optional[List[Dict[str, str]]] = None,
+    resistant_genes_list: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """Extract both antibiotic therapy plan and resistance genes using LangChain.
     Returns dictionary with both results.
     """
+    # Build context for multiple pathogens if provided
+    pathogens_context = ""
+    if pathogens and len(pathogens) > 1:
+        pathogens_list = []
+        for p in pathogens:
+            name = p.get('pathogen_name', '').strip()
+            count = p.get('pathogen_count', '').strip()
+            if name:
+                if count:
+                    pathogens_list.append(f"{name} ({count})")
+                else:
+                    pathogens_list.append(name)
+        if pathogens_list:
+            pathogens_context = f"\nAll Pathogens: {', '.join(pathogens_list)}"
+    
+    # Build context for multiple resistance genes if provided
+    resistance_genes_context = ""
+    if resistant_genes_list and len(resistant_genes_list) > 1:
+        resistance_genes_context = f"\nAll Resistance Genes: {', '.join(resistant_genes_list)}"
+    
     # Create prompt
     prompt = COMBINED_EXTRACTION_PROMPT.format(
-        pathogen_name=pathogen_name,
-        resistant_gene=resistant_gene,
-        pathogen_count=pathogen_count,
+        pathogen_display=pathogen_name,  # Already formatted
+        resistant_gene=resistant_gene,  # Already formatted
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
         sample=sample if sample else 'Not specified',
         systemic='Yes' if systemic else 'No',
+        pathogens_context=pathogens_context,
+        resistance_genes_context=resistance_genes_context,
         content=content
     )
     

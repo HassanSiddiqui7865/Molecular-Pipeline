@@ -1,7 +1,7 @@
 """
 Utility functions for the Molecular Pipeline.
 """
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 
 def fix_text_encoding(text: Optional[str]) -> str:
@@ -73,22 +73,20 @@ def fix_text_encoding(text: Optional[str]) -> str:
     return text.strip()
 
 
-def format_resistance_genes(resistant_gene: Optional[str]) -> str:
+def format_resistance_genes(resistant_genes: List[str]) -> str:
     """
-    Format resistance genes from comma-separated string to readable format.
+    Format resistance genes list to readable format.
     
     Args:
-        resistant_gene: Comma-separated resistance genes (e.g., "vanA, mecA" or "vanA")
+        resistant_genes: List of resistance genes (e.g., ["vanA", "mecA"])
         
     Returns:
         Formatted string for use in prompts (e.g., "vanA and mecA" or "vanA")
     """
-    if not resistant_gene or not resistant_gene.strip():
+    if not resistant_genes:
         return "unknown"
     
-    # Split by comma and clean up
-    genes = [gene.strip() for gene in resistant_gene.split(',')]
-    genes = [gene for gene in genes if gene]  # Remove empty strings
+    genes = [gene.strip() for gene in resistant_genes if gene and str(gene).strip()]
     
     if not genes:
         return "unknown"
@@ -102,22 +100,20 @@ def format_resistance_genes(resistant_gene: Optional[str]) -> str:
         return ", ".join(genes[:-1]) + f", and {genes[-1]}"
 
 
-def format_icd_codes(severity_codes: Optional[str]) -> str:
+def format_icd_codes(severity_codes: List[str]) -> str:
     """
-    Format ICD codes from comma-separated string to readable format.
+    Format ICD codes list to readable format.
     
     Args:
-        severity_codes: Comma-separated ICD codes (e.g., "A41.9, B95.3" or "A41.9")
+        severity_codes: List of ICD codes (e.g., ["A41.9", "B95.3"])
         
     Returns:
         Formatted string for use in prompts (e.g., "A41.9 and B95.3" or "A41.9")
     """
-    if not severity_codes or not severity_codes.strip():
+    if not severity_codes:
         return "not specified"
     
-    # Split by comma and clean up
-    codes = [code.strip().upper() for code in severity_codes.split(',')]
-    codes = [code for code in codes if code]  # Remove empty strings
+    codes = [code.strip().upper() for code in severity_codes if code and str(code).strip()]
     
     if not codes:
         return "not specified"
@@ -149,9 +145,104 @@ def get_icd_names_from_state(state: dict) -> str:
     
     # Fallback to original codes
     input_params = state.get('input_parameters', {})
-    severity_codes_raw = input_params.get('severity_codes', '')
-    if severity_codes_raw:
-        return format_icd_codes(severity_codes_raw)
+    severity_codes = input_params.get('severity_codes', [])
+    if severity_codes:
+        return format_icd_codes(severity_codes)
     
     return "not specified"
 
+
+def format_pathogens(pathogens: List[Dict[str, str]]) -> str:
+    """
+    Format pathogens list to readable format.
+    
+    Args:
+        pathogens: List of dicts with 'pathogen_name' and 'pathogen_count'
+        
+    Returns:
+        Formatted string for use in prompts (e.g., "Staphylococcus aureus (10^6 CFU/ML) and E. coli (10^5 CFU/ML)")
+    """
+    if not pathogens:
+        return "unknown"
+    
+    formatted = []
+    for pathogen in pathogens:
+        if isinstance(pathogen, dict):
+            name = pathogen.get('pathogen_name', '').strip()
+            count = pathogen.get('pathogen_count', '').strip()
+            if name:
+                if count:
+                    formatted.append(f"{name} ({count})")
+                else:
+                    formatted.append(name)
+    
+    if not formatted:
+        return "unknown"
+    
+    if len(formatted) == 1:
+        return formatted[0]
+    elif len(formatted) == 2:
+        return f"{formatted[0]} and {formatted[1]}"
+    else:
+        return ", ".join(formatted[:-1]) + f", and {formatted[-1]}"
+
+
+def get_pathogens_from_input(input_params: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    Get pathogens list from input parameters.
+    
+    Args:
+        input_params: Input parameters dictionary
+        
+    Returns:
+        List of pathogen dicts with 'pathogen_name' and 'pathogen_count'
+    """
+    pathogens = input_params.get('pathogens', [])
+    if not isinstance(pathogens, list):
+        return []
+    
+    result = []
+    for p in pathogens:
+        if isinstance(p, dict):
+            name = p.get('pathogen_name', '').strip()
+            count = p.get('pathogen_count', '').strip()
+            if name:
+                result.append({
+                    'pathogen_name': name,
+                    'pathogen_count': count
+                })
+    return result
+
+
+def get_resistance_genes_from_input(input_params: Dict[str, Any]) -> List[str]:
+    """
+    Get resistance genes list from input parameters.
+    
+    Args:
+        input_params: Input parameters dictionary
+        
+    Returns:
+        List of resistance gene strings
+    """
+    genes = input_params.get('resistant_genes', [])
+    if not isinstance(genes, list):
+        return []
+    
+    return [str(g).strip() for g in genes if g and str(g).strip()]
+
+
+def get_severity_codes_from_input(input_params: Dict[str, Any]) -> List[str]:
+    """
+    Get severity codes list from input parameters.
+    
+    Args:
+        input_params: Input parameters dictionary
+        
+    Returns:
+        List of ICD code strings
+    """
+    codes = input_params.get('severity_codes', [])
+    if not isinstance(codes, list):
+        return []
+    
+    return [str(c).strip().upper() for c in codes if c and str(c).strip()]

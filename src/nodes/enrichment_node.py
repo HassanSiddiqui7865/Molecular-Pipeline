@@ -888,9 +888,10 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Get ICD code names from transformed state
         icd_code_names = get_icd_names_from_state(state)
         
-        # Get resistance gene from input parameters and format
-        resistance_gene_raw = input_params.get('resistant_gene', '')
-        resistance_gene = format_resistance_genes(resistance_gene_raw) if resistance_gene_raw else None
+        # Get resistance genes from input parameters and format
+        from utils import get_resistance_genes_from_input, format_resistance_genes
+        resistant_genes = get_resistance_genes_from_input(input_params)
+        resistance_gene = format_resistance_genes(resistant_genes) if resistant_genes else None
         
         age = input_params.get('age')
         
