@@ -116,7 +116,7 @@ RULES:
 OUTPUT (per antibiotic):
 - coverage_for: Specific indication (e.g., "VRE bacteremia")
 - route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
-- dose_duration: 'dose,route,frequency,duration' or null
+- dose_duration: Natural text format including all dosages (loading and maintenance) in concise way (e.g., "600 mg PO q12h for 7 days", "Loading: 1g IV, then 500 mg q12h for 7-14 days", "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days") or null
 - renal_adjustment: Dose adjustment guidance or null
 - general_considerations: Combined clinical notes or null
 
@@ -450,8 +450,13 @@ FIELD RULES:
 - route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
 - dose_duration: 
   * Use ONLY dosages from sources matching ICD: {severity_codes}, Gene: {resistant_gene}, Age: {age if age else 'N/A'}
-  * Format: "dose,route,frequency,duration" (comma-separated)
-  * Multiple conditions: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2" (pipe-separated)
+  * Format: Natural text format for dosing information - include ALL dosages (loading and maintenance) in concise way
+  * Single: "600 mg PO q12h for 7 days"
+  * With loading: "Loading: 1g IV, then 500 mg q12h for 7-14 days" or "1g IV once, then 500 mg q12h for 7-14 days"
+  * Multiple phases: "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days"
+  * Combinations: "Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days"
+  * EXCLUDE: monitoring details, target levels, infusion rates, administration notes (place in general_considerations)
+  * Include loading doses if present - keep concise and natural
   * DO NOT invent or combine unrelated dosages
   * If null in sources, return null
 {f"  * Sample type: Prioritize dosages for \"{sample}\" samples" if sample else ""}
@@ -481,7 +486,7 @@ Return ALL unified antibiotics."""
             final_category: str = Field(..., description="'first_choice', 'second_choice', or 'alternative_antibiotic' based on category distribution and medical guidelines")
             coverage_for: Optional[str] = Field(None, description="Coverage indication relevant to patient condition. Keep only what matches the use case - do not combine all mentions.")
             route_of_administration: Optional[str] = Field(None, description="Unified route - combine all from all sources in the group")
-            dose_duration: Optional[str] = Field(None, description="ONE optimal dosage FROM PROVIDED SOURCES ONLY that matches patient parameters (ICD codes, resistance gene, age). DO NOT invent or hallucinate. DO NOT combine unrelated dosages. Single: 'dose,route,freq,dur'. If multiple dosages for different conditions (both in patient ICD codes), use pipe: 'dose1,route1,freq1,dur1|dose2,route2,freq2,dur2'. If sources say null or 'not specified', return null (NOT an invented dosage).")
+            dose_duration: Optional[str] = Field(None, description="Dosing information in natural text format including ALL dosages (loading and maintenance) in concise way. MUST match the specific ICD code conditions and consider resistance gene and patient age. Examples: '600 mg IV q12h for 14 days', 'Loading: 1g IV, then 500 mg q12h for 7-14 days', '450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days', 'Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days'. EXCLUDE monitoring details, target levels, infusion rates, administration notes (place in general_considerations). Include loading doses if present - keep concise and natural. DO NOT create duplicates - choose ONE most appropriate dosage. Use ONLY dosages FROM PROVIDED SOURCES ONLY that matches patient parameters (ICD codes, resistance gene, age). DO NOT invent or hallucinate. DO NOT combine unrelated dosages. If sources say null or 'not specified', return null (NOT an invented dosage).")
             renal_adjustment: Optional[str] = Field(None, description="Unified renal adjustment - combine all from all sources in the group")
             general_considerations: Optional[str] = Field(None, description="Unified general considerations - combine all from all sources in the group to make data complete")
             is_complete: bool = Field(..., description="True if medical_name, coverage_for, dose_duration, route_of_administration, renal_adjustment, and general_considerations are ALL non-null. False if any of these critical fields is null.")

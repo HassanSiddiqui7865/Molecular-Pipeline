@@ -905,63 +905,77 @@ def _create_input_section(data: Dict[str, Any], styles) -> list:
 def _create_negative_sections(data: Dict[str, Any], styles) -> list:
     """
     Create the negative organisms and negative resistance genes sections.
-    Gets lists from state and removes pathogen_name and resistant_gene from the respective lists.
+    Uses static lists that always appear in the PDF, regardless of input.
     """
     elements = []
     
-    input_params = data.get('input_parameters', {})
+    # Static list of negative organisms (always displayed)
+    static_negative_organisms = [
+        'Acinetobacter baumannii',
+        'Bacteroides fragilis',
+        'Candida glabrata',
+        'Candida albicans',
+        'Candida auris',
+        'Candida krusei',
+        'Candida lusitaniae',
+        'Candida parapsilosis',
+        'Candida tropicalis',
+        'Citrobacter freundii',
+        'Clostridium novyi',
+        'Clostridium perfringens',
+        'Clostridium septicum',
+        'Enterobacter cloacae',
+        'Enterococcus faecium',
+        'Escherichia coli',
+        'Group A strep',
+        'Group B strep',
+        'Group C and G Strep',
+        'Herpes Zoster',
+        'HSV-1 (Herpes Simplex)',
+        'HSV-2 (Herpes Simplex)',
+        'kingella kingae',
+        'Klebsiella aerogenes',
+        'Klebsiella oxytoca',
+        'Klebsiella pneumoniae',
+        'Morganella morganii',
+        'Not an organism',
+        'Proteus mirabilis',
+        'Proteus vulgaris',
+        'Pseudomonas aeruginosa',
+        'Trichophyton spp.'
+    ]
     
-    # Get pathogens
-    from utils import get_pathogens_from_input
-    pathogens = get_pathogens_from_input(input_params)
-    # Extract pathogen names for filtering
-    pathogen_names = [p.get('pathogen_name', '').strip() for p in pathogens if p.get('pathogen_name', '').strip()]
-    
-    # Get resistance genes
-    from utils import get_resistance_genes_from_input
-    resistant_genes = get_resistance_genes_from_input(input_params)
-    
-    # Get negative organisms from state (check multiple possible locations)
-    negative_organisms = []
-    if 'negative_organisms' in data:
-        negative_organisms = data.get('negative_organisms', [])
-    elif 'result' in data and isinstance(data.get('result'), dict):
-        negative_organisms = data['result'].get('negative_organisms', [])
-    elif 'metadata' in data and isinstance(data.get('metadata'), dict):
-        negative_organisms = data['metadata'].get('negative_organisms', [])
-    
-    # Ensure it's a list
-    if not isinstance(negative_organisms, list):
-        negative_organisms = []
-    
-    # Get negative resistance genes from state (check multiple possible locations)
-    negative_resistance_genes = []
-    if 'negative_resistance_genes' in data:
-        negative_resistance_genes = data.get('negative_resistance_genes', [])
-    elif 'result' in data and isinstance(data.get('result'), dict):
-        negative_resistance_genes = data['result'].get('negative_resistance_genes', [])
-    elif 'metadata' in data and isinstance(data.get('metadata'), dict):
-        negative_resistance_genes = data['metadata'].get('negative_resistance_genes', [])
-    
-    # Ensure it's a list
-    if not isinstance(negative_resistance_genes, list):
-        negative_resistance_genes = []
-    
-    # Remove pathogen names from negative organisms (case-insensitive)
-    if pathogen_names and negative_organisms:
-        pathogen_names_lower = [name.lower() for name in pathogen_names]
-        negative_organisms = [org for org in negative_organisms 
-                            if org.lower() not in pathogen_names_lower]
-    
-    # Remove resistance genes from negative resistance genes (case-insensitive)
-    if resistant_genes and negative_resistance_genes:
-        resistant_genes_lower = [g.lower() for g in resistant_genes]
-        negative_resistance_genes = [gene for gene in negative_resistance_genes
-                                   if gene.lower() not in resistant_genes_lower]
-    
-    # If no negative organisms or genes, return empty (don't show sections)
-    if not negative_organisms and not negative_resistance_genes:
-        return elements
+    # Static list of negative resistance genes (always displayed)
+    static_negative_resistance_genes = [
+        'ampC',
+        'Ant-2',
+        'Aph 2',
+        'aph3',
+        'CTX-M1',
+        'CTX-M2',
+        'dfrA1',
+        'dfrA5',
+        'Erm B',
+        'ErmA',
+        'femA',
+        'Gyrase A',
+        'KPC',
+        'mefA',
+        'NDM',
+        'OXA-48',
+        'Par C',
+        'QnrA',
+        'QnrB',
+        'SHV',
+        'Sul 2',
+        'Sul1',
+        'TEM',
+        'Tet O',
+        'tetB',
+        'vanA1',
+        'vanA2',
+        'VanB'
+    ]
     
     # Create styles for negative sections
     negative_header_style = ParagraphStyle(
@@ -985,73 +999,71 @@ def _create_negative_sections(data: Dict[str, Any], styles) -> list:
         spaceAfter=0
     )
     
-    # Section 1: NEGATIVE ORGANISMS TESTED (only if we have organisms)
-    if negative_organisms:
-        elements.append(Spacer(1, 0.15 * inch))
-        
-        # Header
-        org_header_text = Paragraph("NEGATIVE ORGANISMS TESTED", negative_header_style)
-        org_header_table = Table([[org_header_text]], colWidths=[7.5 * inch])
-        org_header_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ]))
-        elements.append(org_header_table)
-        
-        # Content
-        org_content_text = ', '.join(negative_organisms)
-        org_content = Paragraph(org_content_text, negative_content_style)
-        org_content_table = Table([[org_content]], colWidths=[7.5 * inch])
-        org_content_table.setStyle(TableStyle([
-            ('BOX', (0, 0), (-1, -1), 0.5, black),
-            ('BACKGROUND', (0, 0), (-1, -1), white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ]))
-        elements.append(org_content_table)
+    # Section 1: NEGATIVE ORGANISMS TESTED (always displayed)
+    elements.append(Spacer(1, 0.15 * inch))
     
-    # Section 2: NEGATIVE RESISTANCE GENES TESTED (only if we have genes)
-    if negative_resistance_genes:
-        elements.append(Spacer(1, 0.15 * inch))
-        
-        # Header
-        gene_header_text = Paragraph("NEGATIVE RESISTANCE GENES TESTED", negative_header_style)
-        gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
-        gene_header_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ]))
-        elements.append(gene_header_table)
-        
-        # Content
-        gene_content_text = ', '.join(negative_resistance_genes)
-        gene_content = Paragraph(gene_content_text, negative_content_style)
-        gene_content_table = Table([[gene_content]], colWidths=[7.5 * inch])
-        gene_content_table.setStyle(TableStyle([
-            ('BOX', (0, 0), (-1, -1), 0.5, black),
-            ('BACKGROUND', (0, 0), (-1, -1), white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ]))
-        elements.append(gene_content_table)
+    # Header
+    org_header_text = Paragraph("NEGATIVE ORGANISMS TESTED", negative_header_style)
+    org_header_table = Table([[org_header_text]], colWidths=[7.5 * inch])
+    org_header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(org_header_table)
+    
+    # Content
+    org_content_text = ', '.join(static_negative_organisms)
+    org_content = Paragraph(org_content_text, negative_content_style)
+    org_content_table = Table([[org_content]], colWidths=[7.5 * inch])
+    org_content_table.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.5, black),
+        ('BACKGROUND', (0, 0), (-1, -1), white),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(org_content_table)
+    
+    # Section 2: NEGATIVE RESISTANCE GENES TESTED (always displayed)
+    elements.append(Spacer(1, 0.15 * inch))
+    
+    # Header
+    gene_header_text = Paragraph("NEGATIVE RESISTANCE GENES TESTED", negative_header_style)
+    gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
+    gene_header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(gene_header_table)
+    
+    # Content
+    gene_content_text = ', '.join(static_negative_resistance_genes)
+    gene_content = Paragraph(gene_content_text, negative_content_style)
+    gene_content_table = Table([[gene_content]], colWidths=[7.5 * inch])
+    gene_content_table.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.5, black),
+        ('BACKGROUND', (0, 0), (-1, -1), white),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(gene_content_table)
     
     return elements
 
@@ -1063,10 +1075,8 @@ _current_page = [0]
 def _draw_footer(canv):
     """Draw footer at the bottom of the page."""
     footer_text = (
-        "This test was developed and its performance characteristics determined by Elixir Diagnostics. "
-        "It has not been cleared or approved by the FDA. However, such approval/clearance is not required, "
-        "as the laboratory is regulated and qualified under CLIA to perform high-complexity testing. "
-        "This test is used for clinical purposes, and should not be regarded as investigational or for research."
+        "The estimated microbial load is the approximate copies of target nucleic acid, present in the original sample (copies per mL), categorized as follows: HIGH (>1 million copies/mL). MODERATE (500,000-1 million copies per mL), and LOW (100,000-500,000 copies per mL). Levels less than LOW are generally not reported, unless deemed potentially significant. Loads less than LOW generally represent normal flora/contaminants. "
+        "CLIA# 45D2257672 Processing and Detection Methodology: DNA/RNA extraction from the sample was performed. Reverse transcriptase polymerase chain reaction (TaqMan qPCR) was utilized for detection."
     )
     
     # Save canvas state

@@ -508,10 +508,10 @@ def _extract_fields_with_langchain_memory(
         
         class DosageExtractionResult(BaseModel):
             """Schema for extracted dosage information."""
-            dose_duration: Optional[str] = Field(None, description="Dosing information in format 'dose,route,frequency,duration'. MUST match the specific ICD code conditions and consider resistance gene and patient age. Frequency MUST include 'q' prefix (q8h, q12h, q24h). DO NOT include loading doses. DO NOT create duplicates - choose ONE most appropriate dosage. If truly different dosages for different conditions (both in ICD codes), use pipe separator. Examples: '600 mg,IV,q12h,14 days' or '500 mg,PO,q8h,7 days|600 mg,IV,q12h,14 days'. Use existing value if already present, otherwise extract from content.")
+            dose_duration: Optional[str] = Field(None, description="Dosing information in natural text format including ALL dosages (loading and maintenance) in concise way. MUST match the specific ICD code conditions and consider resistance gene and patient age. Examples: '600 mg IV q12h for 14 days', 'Loading: 1g IV, then 500 mg q12h for 7-14 days', '450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days', 'Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days'. EXCLUDE monitoring details, target levels, infusion rates, administration notes (place in general_considerations). Include loading doses if present - keep concise and natural. DO NOT create duplicates - choose ONE most appropriate dosage. Use existing value if already present, otherwise extract from content.")
             route_of_administration: Optional[str] = Field(None, description="Route of administration. Must be one of: 'IV', 'PO', 'IM', 'IV/PO'. Examples: 'IV', 'PO', 'IV/PO'. Use existing value if already present, otherwise extract from content.")
             general_considerations: Optional[str] = Field(None, description="Clinical notes and considerations. If dose_duration contains multiple dosages (separated by |), mention which condition from ICD codes each dosage is for. Examples: 'Monitor renal function, risk of nephrotoxicity' or 'For bacteremia: 600 mg IV q12h. For pneumonia: 500 mg PO q8h. Monitor renal function.'. Use existing value if already present, otherwise extract from content.")
-            coverage_for: Optional[str] = Field(None, description="Conditions or infections this antibiotic covers. Should align with the ICD code conditions provided. Examples: 'MRSA bacteremia, MRSA endocarditis' or 'Sepsis due to Staphylococcus aureus, Community-acquired pneumonia'. Use existing value if already present, otherwise extract from content.")
+            coverage_for: Optional[str] = Field(None, description="Conditions or infections this antibiotic covers using clinical terminology only (e.g., 'MRSA bacteremia', 'VRE bacteremia', 'Staphylococcus aureus bacteremia'). Do NOT include ICD codes (e.g., A41.2) or ICD code names (e.g., 'Sepsis due to...'). Use clinical terms like 'bacteremia', 'sepsis', 'endocarditis'. Use existing value if already present, otherwise extract from content.")
             renal_adjustment: Optional[str] = Field(None, description="Renal adjustment or dosing guidelines for patients with renal impairment. Be concise and factual - NO repetition, NO references, NO citations. Extract only essential adjustment information. Examples: 'Adjust dose in CrCl < 30 mL/min' or 'No adjustment needed' or 'Reduce dose by 50% in CrCl < 30 mL/min'. Use existing value if already present, otherwise extract from content.")
         
         patient_age_str = f"{age} years" if age else "adult"
@@ -593,7 +593,7 @@ DOSAGE EXTRACTION RULES:
 2. Consider Resistance Gene: {resistance_gene_str}
 3. Consider Patient Age: {patient_age_str} (pediatric vs adult)
 4. DO NOT extract duplicates - choose ONE most appropriate
-5. DO NOT include loading doses - only maintenance
+5. Include loading doses if present - keep concise and natural (e.g., "Loading: 1g IV, then 500 mg q12h for 7-14 days")
 6. Extract ONLY dosage(s) relevant to ICD: {icd_code_names_str}
 7. Frequency MUST include "q" prefix: q8h, q12h, q24h (NEVER just 8h, 12h, 24h)
 8. Be precise - no variations or duplicates
@@ -610,16 +610,14 @@ INSTRUCTIONS:
 4. Maintain consistency with previous chunk contexts
 
 FIELD DESCRIPTIONS (extract ONLY if in missing_fields):
-- dose_duration: 'dose,route,frequency,duration'
+- dose_duration: Natural text format including ALL dosages (loading and maintenance) in concise way (e.g., "600 mg IV q12h for 14 days", "Loading: 1g IV, then 500 mg q12h for 7-14 days", "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days")
   * Match ICD: {icd_code_names_str}, Gene: {resistance_gene_str}, Age: {patient_age_str}
   * Frequency MUST include "q" prefix (q8h, q12h, q24h)
-  * NO loading doses - only maintenance
+  * Include loading doses if present - keep concise and natural (e.g., "Loading: 1g IV, then 500 mg q12h for 7-14 days")
   * NO duplicates - choose ONE most appropriate
-  * Multiple conditions: "dose1,route1,freq1,dur1|dose2,route2,freq2,dur2" (pipe-separated)
-  * Examples: "600 mg,IV,q12h,14 days" or "500 mg,PO,q8h,7 days|600 mg,IV,q12h,14 days"
 - route_of_administration: 'IV', 'PO', 'IM', 'IV/PO'
 - general_considerations: Clinical notes. If multiple dosages, mention which ICD condition each is for
-- coverage_for: Conditions matching ICD: {icd_code_names_str}
+- coverage_for: Conditions matching patient's clinical condition using clinical terminology only (e.g., "MRSA bacteremia", "VRE bacteremia")
 - renal_adjustment: Concise adjustment info (NO repetition/references/citations)
   Examples: "Adjust dose in CrCl < 30 mL/min" or "No adjustment needed"
 
@@ -627,7 +625,7 @@ CRITICAL:
 - Extract ONLY missing fields - return existing for others
 - Use ICD, Gene, Age for ACCURATE dosages
 - NO duplicates or conflicting dosages
-- NO loading doses
+- Include loading doses if present - keep concise and natural
 - Accuracy > completeness"""
                 
                 result = structured_llm.invoke(prompt)

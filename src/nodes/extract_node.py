@@ -48,14 +48,14 @@ FIELDS:
 - medical_name: Title case, no dosage/brand/route/salts. Normalize combinations to "Drug1 plus Drug2"
   Examples: "vancomycin 1g IV" → "Vancomycin" | "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole"
 - is_combined: True if name contains "plus" after normalization, else False
-- coverage_for: Specific indication (e.g., "MRSA bacteremia")
+- coverage_for: Specific indication using clinical terminology only (e.g., "MRSA bacteremia", "VRE bacteremia", "Staphylococcus aureus bacteremia"). Do NOT include ICD codes (e.g., A41.2) or ICD code names (e.g., "Sepsis due to..."). Use clinical terms like "bacteremia", "sepsis", "endocarditis".
 - route_of_administration: "IV", "PO", "IM", "IV/PO", "Oral" (null if not mentioned)
-- dose_duration: "dose,route,frequency,duration" (comma-separated)
-  * Single: "600 mg,PO,q12h,7 days"
-  * Combinations: "Drug1:dose1,route1,freq1,dur1|Drug2:dose2,route2,freq2,dur2" (pipe-separated)
-  * Loading doses: Use maintenance only
-  * Missing: Use "null" for missing components
-  * Examples: "600 mg,PO,q12h,7 days" | "Ampicillin:2g,IV,q4h,14 days|Gentamicin:1mg/kg,IV,q8h,14 days"
+- dose_duration: Natural text format for dosing information including ALL dosages (loading and maintenance) in concise way
+  * Single: "600 mg PO q12h for 7 days"
+  * With loading: "Loading: 1g IV, then 500 mg q12h for 7-14 days" or "1g IV once, then 500 mg q12h for 7-14 days"
+  * Multiple phases: "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days"
+  * Combinations: "Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days"
+  * EXCLUDE: monitoring details, target levels, infusion rates, administration notes (place in general_considerations)
 - renal_adjustment: "Adjust dose for CrCl < X mL/min" or similar (null if not mentioned)
 - general_considerations: Synthesize clinical notes concisely (null if none)
 
@@ -69,8 +69,8 @@ VALIDATION:
 - medical_name: ALWAYS normalize combinations (never keep hyphen/slash)
 - is_combined: True if hyphen (-), slash (/), "plus", or explicit "and/with" in original
 - NEVER extract genes (mecA, vanA) as antibiotics
-- dose_duration: Always comma-separated, include all dosages for combinations
-- Loading doses: Use maintenance only
+- dose_duration: Use natural text format, include all dosages for combinations
+- Loading doses: Include loading doses if present - keep concise and natural (e.g., "Loading: 1g IV, then 500 mg q12h for 7-14 days")
 - Synthesize intelligently (no verbatim copying)
 
 EXCLUDE:
