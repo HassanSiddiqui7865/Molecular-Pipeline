@@ -1,0 +1,26 @@
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Staphylococcus aureus",
+      "pathogen_count": "10^3 CFU/ML"
+    },
+    {
+      "pathogen_name": "Enterococcus faecalis",
+      "pathogen_count": "10^4 CFU/ML"
+    }
+  ],
+  "resistant_genes": [
+    "mecA",
+    "tetM",
+    "dfrA",
+    "Ant-la"
+  ],
+  "severity_codes": [
+    "A41.2",
+    "A41.81"
+  ],
+  "age": 32,
+  "sample": "Blood",
+  "systemic": true
+}
+

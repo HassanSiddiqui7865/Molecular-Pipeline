@@ -92,17 +92,15 @@ def main():
     
     # Ollama configuration is now handled in each node that needs it
     
-    inputs = {
-        'pathogens': [
-            {'pathogen_name': 'Staphylococcus aureus', 'pathogen_count': '10^3 CFU/ML'},
-            {'pathogen_name': 'Enterococcus faecalis', 'pathogen_count': '10^4 CFU/ML'}
-        ],
-        'resistant_genes': ['mecA', 'tetM','dfrA','Ant-la',],
-        'severity_codes': ['A41.2', 'A41.81'],
-        'age': 32,
-        'sample': 'Blood',
-        'systemic': True
-    }
+    # Load inputs from input.json
+    input_file = project_root / "input.json"
+    if input_file.exists():
+        with open(input_file, 'r', encoding='utf-8') as f:
+            inputs = json.load(f)
+    else:
+        logger.error(f"input.json not found at {input_file}")
+        logger.error("Please create input.json with the required input parameters")
+        sys.exit(1)
     
     # Allow override via command-line arguments
     if len(sys.argv) > 1:
