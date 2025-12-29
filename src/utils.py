@@ -129,17 +129,34 @@ def format_icd_codes(severity_codes: List[str]) -> str:
 
 def get_icd_names_from_state(state: dict) -> str:
     """
-    Get transformed ICD code names from state, falling back to codes if not available.
+    Get transformed ICD codes formatted as "ICD-10 Code (icd name)" from state.
     
     Args:
         state: Pipeline state dictionary
         
     Returns:
-        ICD code names (or codes if names not available)
+        Formatted ICD codes string (e.g., "A41.2 (Sepsis, other specified), A41.81 (Sepsis due to other specified organisms)")
     """
     icd_transformation = state.get('icd_transformation', {})
-    severity_codes_transformed = icd_transformation.get('severity_codes_transformed', '')
+    code_names_list = icd_transformation.get('code_names', [])
     
+    # Format as "ICD-10 Code (icd name)"
+    if code_names_list:
+        formatted_codes = []
+        for item in code_names_list:
+            if isinstance(item, dict):
+                code = item.get('code', '')
+                name = item.get('name', '')
+                if code and name and name != code:
+                    formatted_codes.append(f"{code} ({name})")
+                elif code:
+                    formatted_codes.append(code)
+        
+        if formatted_codes:
+            return ', '.join(formatted_codes)
+    
+    # Fallback: try severity_codes_transformed
+    severity_codes_transformed = icd_transformation.get('severity_codes_transformed', '')
     if severity_codes_transformed:
         return severity_codes_transformed
     

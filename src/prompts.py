@@ -4,150 +4,120 @@ Prompt templates and helper functions for LLM interactions.
 from typing import List, Optional, Dict
 
 
-EXTRACTION_PROMPT_TEMPLATE = """You are extracting antibiotic therapy information from medical content.
+EXTRACTION_PROMPT_TEMPLATE = """Extract antibiotic therapy information from medical content.
 
-GOLDEN RULE:
-Extract ONLY information that is EXPLICITLY written in the SOURCE CONTENT.
-Do NOT infer, assume, normalize, summarize, or use medical knowledge.
-If any value is unclear, incomplete, or not explicitly stated, output null.
-
-PATIENT CONTEXT (for reference only, do NOT infer from it):
-Pathogen: {pathogen_display}
-Resistance Genes: {resistant_gene}
-ICD / Severity: {severity_codes}
-Age: {age}
-Sample: {sample}
-Systemic: {systemic}
+PATIENT CONTEXT:
+- Pathogen: {pathogen_display}
+- Resistance Genes: {resistant_gene}
+- ICD Codes: {severity_codes}
+- Age: {age} | Sample: {sample} | Systemic: {systemic}
 
 SOURCE CONTENT:
+The source content below is extracted from medical literature, guidelines, and research articles. It may contain:
+- Plain text with markdown formatting (headers, lists, tables)
+- Structured tables with pipe delimiters (|)
+- Clinical guidelines, dosing recommendations, and treatment protocols
+- References to studies, guidelines, and medical authorities
+- Abbreviations and medical terminology
+
+Extract information from this content:
+
 {content}
 
-PART 1: WHICH ANTIBIOTICS TO EXTRACT
+EXTRACTION RULES:
 
-Extract an antibiotic ONLY if all of the following are true:
-- The drug name is explicitly written in the source
-- The source states the drug is effective, recommended, or used for this infection
-- The source connects the drug to the pathogen or clinical condition
+1. ANTIBIOTICS:
+   - Extract only antibiotics effective against {pathogen_display} with {resistant_gene}
+   - Match clinical severity to ICD codes: {severity_codes}
+   - Consolidate duplicates unless clinically distinct
 
-Do NOT extract:
-- Resistance gene names (mecA, vanA, etc.)
-- Drug classes without specific drug names
-- Drugs described as resistant, ineffective, or not recommended
-- Investigational or non-approved drugs
-- Drugs mentioned only in historical or background context
+2. COMBINATION DRUGS:
+   - Detect: "Drug1 and Drug2", "Drug1/Drug2", "Drug1-Drug2", hyphenated names
+   - Normalize: "Drug1 plus Drug2" (lowercase "plus", Title Case drugs)
+   - Examples: "Quinupristin-dalfopristin" → "Quinupristin plus Dalfopristin"
+   - Examples: "Trimethoprim-sulfamethoxazole" → "Trimethoprim plus Sulfamethoxazole"
+   - Examples: "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole"
 
-PART 2: COMBINATION DRUGS
+3. CATEGORIES:
+   - first_choice: "first-line", "preferred", "recommended", "primary", or when listed first/primarily
+   - second_choice: "alternative", "second-line", or when mentioned as backup option
+   - alternative_antibiotic: "salvage", "last resort", or when mentioned as other option
+   - not_known: Only use when category is truly unclear or cannot be determined
+   
+   Assign categories based on explicit statements OR contextual clues (order, emphasis, coverage description).
+   For each categorized antibiotic, extract a complete, meaningful sentence from the source that explains 
+   why it belongs in that category. The citation must provide sufficient context to justify the categorization.
 
-If two drugs are connected by a hyphen, slash, or words like "and" or "with", treat them as a combination.
+4. REQUIRED FIELDS - STRICT FORMATTING (CRITICAL FOR CONSISTENCY):
 
-Input examples:
-Ampicillin-sulbactam
-TMP/SMX
-Piperacillin-tazobactam
-Imipenem and cilastatin
+   - medical_name: Title Case ONLY. No dosage, brand, route, or salts.
+     Example: "Vancomycin" (NOT "vancomycin 1g IV" or "Vancomycin HCl")
+   
+   - coverage_for: Single primary indication ONLY. Format: "[Pathogen] [condition]"
+     Examples: "MRSA bacteremia", "VRE bacteremia", "Staphylococcus aureus bacteremia"
+     If multiple pathogens mentioned, use the PRIMARY one for this extraction context.
+     DO NOT combine multiple pathogens unless source explicitly states combination therapy.
+     DO NOT include ICD codes or ICD code names.
+   
+   - route_of_administration: Extract route if mentioned anywhere in source.
+     * Format: "IV", "PO", "IM", or "IV/PO"
+     * Extract from dosing information if route is mentioned there
+     * If not stated anywhere → null
+   
+   - dose_duration: Complete dosing information with dose, frequency, and duration.
+     * Format: "[dose] [route] [frequency] for [duration]"
+       Example: "15-20 mg/kg IV q12h for 14 days"
+     * With loading: "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]"
+       Example: "Loading: 1g IV, then 500 mg IV q12h for 7-14 days"
+     * Must include: dose amount, frequency, and duration
+     * If any part is missing (dose, frequency, or duration) → null
+     * Convert frequency abbreviations: "BID" → "q12h", "TID" → "q8h", "daily" → "q24h"
+     * Keep ranges as written (e.g., "15-20 mg/kg", "7-14 days")
+     * DO NOT include renal adjustments - that belongs in renal_adjustment
+   
+   - renal_adjustment: 
+     * If source explicitly states "No Renal Adjustment needed" or similar → "No Renal Adjustment"
+     * If source states specific CrCl threshold → EXACT format: "Adjust dose for CrCl < [X] mL/min"
+       Examples: "Adjust dose for CrCl < 30 mL/min", "Adjust dose for CrCl < 50 mL/min"
+       DO NOT use: "Adjust dose if CrCl", "Adjust dose in CrCl", "Dose adjust for", "Adjust for renal dysfunction"
+       If multiple thresholds, use most restrictive: "Adjust dose for CrCl < 30 mL/min"
+     * If source does not state anything about renal adjustment → null
+     * DO NOT duplicate information that belongs in general_considerations
+   
+   - general_considerations: Brief clinical notes only. Use semicolons to separate points.
+     * Include: monitoring requirements, warnings, toxicity, interactions, contraindications
+     * Examples: "Monitor trough levels; watch for nephrotoxicity"
+     * DO NOT include: dosing information, drug class descriptions, efficacy statements
+     * DO NOT duplicate: renal adjustment information, dosing information
+     * Keep concise - maximum 2-3 key points
+     * (null if none)
 
-Output format (mandatory):
-Ampicillin plus Sulbactam
-Trimethoprim plus Sulfamethoxazole
-Piperacillin plus Tazobactam
-Imipenem plus Cilastatin
+5. RESISTANCE GENES (for each from {resistant_gene}):
+   - detected_resistant_gene_name: Gene name (e.g., "mecA")
+   - potential_medication_class_affected: Affected antibiotic classes
+   - general_considerations: Resistance mechanism (null if none)
 
-Rules:
-- Always use the word "plus" in lowercase
-- Always use Title Case for each drug name
-- Do not output slashes or hyphens
+6. CONSISTENCY RULES (CRITICAL):
+   - For the SAME antibiotic, extract the MOST COMPLETE and STANDARD information
+   - If multiple dosages mentioned, use the STANDARD/MOST COMMON clinical dose
+   - If range given (e.g., "15-20 mg/kg"), ALWAYS keep the range - do not simplify to single value
+   - If duration mentioned, ALWAYS include it in dose_duration field
+   - coverage_for should reflect PRIMARY indication for this specific pathogen/resistance
+   - renal_adjustment MUST use format: "Adjust dose for CrCl < X mL/min" (not "if" or "in")
+   - dose_duration and renal_adjustment are SEPARATE fields - do not mix them
 
-PART 3: CATEGORIZATION (one per antibiotic)
+7. VALIDATION:
+   - Each antibiotic appears in ONE category only
+   - medical_name: ALWAYS normalize combinations to "plus" format (no hyphens/slashes)
+   - NEVER extract resistance genes (mecA, vanA) as antibiotics
+   - Extract verbatim when possible, but normalize format to match standards above
+   - If dose_duration is incomplete (missing dose, frequency, or duration) → set to null
 
-Assign a category ONLY if the source explicitly uses the stated language.
-
-first_choice:
-Use only if the source states "first-line", "preferred", "recommended", or "standard therapy"
-
-second_choice:
-Use only if the source states "alternative", "second-line", or "if first-line fails"
-
-alternative_antibiotic:
-Use only if the source states "salvage", "last resort", or "when no other options"
-
-not_known:
-Use when no hierarchy or preference language is explicitly stated
-
-PART 4: REQUIRED FIELDS FOR EACH ANTIBIOTIC
-
-medical_name:
-- Drug name in Title Case
-- No dose, route, or brand names
-- If unclear, output null
-
-coverage_for:
-- Extract only if the indication is explicitly stated
-- Use the exact wording from the source
-- Format "[Pathogen] [condition]" only if both appear together
-- If not stated, output null
-
-route_of_administration:
-- Extract only if explicitly written
-- Allowed values: IV, PO, IM, IV/PO
-- Use IV/PO only if both routes are explicitly mentioned
-- If not stated, output null
-
-dose_duration:
-- Extract only complete dosing statements
-- Must include dose, frequency, and duration
-- Keep abbreviations exactly as written (q12h, q24h, q8h)
-- Do not convert BID, TID, or other formats
-- If any part is missing, output null
-
-renal_adjustment:
-- Extract only explicit renal dosing statements
-- Allowed values:
-  "Adjust dose for CrCl < X mL/min"
-  "No Renal Adjustment"
-- Vague statements like "use caution in renal disease" → output null
-- If not stated, output null
-
-general_considerations:
-- Extract only explicit clinical notes
-- May include monitoring, toxicity, interactions, contraindications
-- Separate multiple points with semicolons
-- Do not include dosing or renal information
-- If none stated, output null
-
-is_combined:
-- True if medical_name contains "plus"
-- False otherwise
-
-PART 5: RESISTANCE GENES
-
-For each resistance gene explicitly mentioned:
-
-detected_resistant_gene_name:
-- Exact gene name as written in the source
-
-potential_medication_class_affected:
-- Extract only if the source explicitly states the affected drug class
-- If not stated, output null
-
-general_considerations:
-- Extract only explicit statements about resistance mechanism or clinical impact
-- If not stated, output null
-
-FINAL VALIDATION BEFORE OUTPUT
-
-- Every antibiotic name must appear verbatim in the source
-- All combination drugs must use "plus" format
-- No inferred or filled-in information
-- No duplicate antibiotics
-- Categorization must match exact source language
-- Dose and duration must be complete or null
-
-OUTPUT FORMAT
-
-Return valid JSON containing:
-- A list of extracted antibiotics, each with all required fields
-- A list of detected resistance genes, each with all required fields
-"""
+8. EXCLUDE:
+   - Resistance genes listed as antibiotics
+   - Ineffective/resistant antibiotics
+   - Drug classes without specific names
+   - Experimental drugs (unless recommended)"""
 
 
 

@@ -105,6 +105,9 @@ def _extract_with_llamaindex(
             
             result_dict = result.model_dump()
             
+            # Post-process to fix is_combined, route extraction, and frequency conversion
+            result_dict = _post_process_extraction_result(result_dict)
+            
             # Log summary
             therapy = result_dict.get('antibiotic_therapy_plan', {})
             logger.info(
@@ -136,6 +139,32 @@ def _empty_result() -> Dict[str, Any]:
         },
         'pharmacist_analysis_on_resistant_gene': []
     }
+
+
+def _post_process_extraction_result(result_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Post-process extraction results to set is_combined based on "plus" in medical_name.
+    """
+    therapy_plan = result_dict.get('antibiotic_therapy_plan', {})
+    
+    for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+        antibiotics = therapy_plan.get(category, [])
+        if not isinstance(antibiotics, list):
+            continue
+            
+        for ab in antibiotics:
+            if not isinstance(ab, dict):
+                continue
+            
+            medical_name = ab.get('medical_name', '')
+            
+            # Set is_combined based on "plus" in medical_name
+            if medical_name and ' plus ' in medical_name.lower():
+                ab['is_combined'] = True
+            else:
+                ab['is_combined'] = False
+    
+    return result_dict
 
 
 def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
