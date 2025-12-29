@@ -14,39 +14,18 @@ from schemas import SearchResult, CombinedExtractionResult
 from prompts import EXTRACTION_PROMPT_TEMPLATE
 from utils import (format_resistance_genes, get_icd_names_from_state, 
                    get_pathogens_from_input, format_pathogens, 
-                   get_resistance_genes_from_input)
-from config import get_ollama_config
+                   get_resistance_genes_from_input, create_llm)
 
 logger = logging.getLogger(__name__)
 
 # LlamaIndex imports with fallback
 try:
     from llama_index.core.program import LLMTextCompletionProgram
-    from llama_index.llms.ollama import Ollama
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
-    Ollama = None
-
-
-def _create_llm() -> Optional[Ollama]:
-    """Create LlamaIndex Ollama LLM instance."""
-    if not LLAMAINDEX_AVAILABLE:
-        return None
-    
-    try:
-        config = get_ollama_config()
-        return Ollama(
-            model=config['model'].replace('ollama/', ''),
-            base_url=config['api_base'],
-            temperature=config['temperature'],
-            request_timeout=600.0
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Ollama LLM: {e}")
-        return None
 
 
 def _extract_with_llamaindex(
@@ -68,20 +47,41 @@ def _extract_with_llamaindex(
     Args:
         retry_delay: Initial delay between retries in seconds (default: 2.0)
     """
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.error("LlamaIndex LLM not available")
         return _empty_result()
     
+    # Build conditional resistance gene sections
+    if resistant_gene:
+        resistance_context = f" | Resistance: {resistant_gene}"
+        resistance_task = f" with {resistant_gene} resistance"
+        resistance_genes_section = f"""RESISTANCE GENES (for each in {resistant_gene}):
+- detected_resistant_gene_name: Exact name ("mecA", "tetM", "dfrA", "Ant-la")
+- potential_medication_class_affected: Classes affected. Look for: "beta-lactams", "penicillins", "cephalosporins", "tetracyclines", "trimethoprim", "aminoglycosides", "TMP-SMX". Infer from mechanism (e.g., "methicillin resistance" → beta-lactams) or specific drugs mentioned. Use knowledge: mecA→beta-lactams, tetM→tetracyclines, dfrA→trimethoprim/TMP-SMX, Ant-la→aminoglycosides. Use null only if no info exists.
+- general_considerations: Mechanism/how gene confers resistance. Use null only if no mechanism info exists.
+
+"""
+        resistance_filtering_rule = f"""3. Filtering: DO NOT extract antibiotics ineffective due to {resistant_gene}. Example: mecA present → skip oxacillin, nafcillin, methicillin, cefazolin, other beta-lactams ineffective against MRSA. Only extract antibiotics retaining activity.
+"""
+    else:
+        resistance_context = ""
+        resistance_task = ""
+        resistance_genes_section = ""
+        resistance_filtering_rule = ""
+    
     # Format prompt
     prompt = EXTRACTION_PROMPT_TEMPLATE.format(
         pathogen_display=pathogen_name,
-        resistant_gene=resistant_gene,
+        resistance_context=resistance_context,
+        resistance_task=resistance_task,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
         sample=sample or 'Not specified',
         systemic='Yes' if systemic else 'No',
-        content=content
+        content=content,
+        resistance_genes_section=resistance_genes_section,
+        resistance_filtering_rule=resistance_filtering_rule
     )
     
     attempt = 0

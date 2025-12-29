@@ -5,7 +5,6 @@ Only processes entries where is_complete is False.
 """
 import logging
 import json
-import re
 from typing import Dict, Any, Optional, List, Tuple
 from urllib.parse import quote_plus
 from pathlib import Path
@@ -14,8 +13,7 @@ import random
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import format_resistance_genes, get_icd_names_from_state
-from config import get_ollama_config
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm
 from schemas import AntibioticMatchResult, DosageExtractionResult
 from prompts import ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE, DOSAGE_EXTRACTION_PROMPT_TEMPLATE
 
@@ -24,14 +22,12 @@ logger = logging.getLogger(__name__)
 # LlamaIndex imports with fallback
 try:
     from llama_index.core.program import LLMTextCompletionProgram
-    from llama_index.llms.ollama import Ollama
     from llama_index.core.node_parser import SentenceSplitter
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
-    Ollama = None
     SentenceSplitter = None
 
 # NLTK imports with fallback
@@ -234,22 +230,6 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         return None
 
 
-def _create_llm() -> Optional[Ollama]:
-    """Create LlamaIndex Ollama LLM instance."""
-    if not LLAMAINDEX_AVAILABLE:
-        return None
-    
-    try:
-        config = get_ollama_config()
-        return Ollama(
-            model=config['model'].replace('ollama/', ''),
-            base_url=config['api_base'],
-            temperature=config['temperature'],
-            request_timeout=600.0
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Ollama LLM: {e}")
-        return None
 
 
 def _validate_antibiotic_match(
@@ -272,7 +252,7 @@ def _validate_antibiotic_match(
     if not driver:
         return False
     
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.warning("LLM not available for validation, allowing match")
         return True
@@ -497,7 +477,7 @@ def _extract_fields_with_llamaindex(
         logger.error("LlamaIndex not available for extraction")
         return {}
     
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.error("LLM not available for extraction")
         return {}
@@ -506,7 +486,14 @@ def _extract_fields_with_llamaindex(
         patient_age_str = f"{age} years" if age else "adult"
         missing_fields_str = ", ".join(missing_fields)
         icd_code_names_str = icd_code_names if icd_code_names else "none"
-        resistance_gene_str = resistance_gene if resistance_gene else "none"
+        
+        # Build conditional resistance gene sections
+        if resistance_gene:
+            gene_context = f" | Gene={resistance_gene}"
+            gene_matching = f", Gene: {resistance_gene}"
+        else:
+            gene_context = ""
+            gene_matching = ""
         
         # Build existing data context
         existing_data_context = ""
@@ -566,7 +553,8 @@ def _extract_fields_with_llamaindex(
                         medical_name=medical_name,
                         patient_age=patient_age_str,
                         icd_codes=icd_code_names_str,
-                        resistance_gene=resistance_gene_str,
+                        gene_context=gene_context,
+                        gene_matching=gene_matching,
                         missing_fields=missing_fields_str,
                         existing_data=existing_data_context,
                         cross_chunk_context=cross_chunk_context,
@@ -842,7 +830,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Get resistance genes from input parameters and format
         from utils import get_resistance_genes_from_input, format_resistance_genes
         resistant_genes = get_resistance_genes_from_input(input_params)
-        resistance_gene = format_resistance_genes(resistant_genes) if resistant_genes else None
+        resistance_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
         
         age = input_params.get('age')
         

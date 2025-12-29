@@ -15,40 +15,19 @@ from prompts import ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE
 from utils import (
     format_resistance_genes, get_icd_names_from_state,
     get_pathogens_from_input, format_pathogens,
-    get_resistance_genes_from_input
+    get_resistance_genes_from_input, create_llm
 )
-from config import get_ollama_config
 
 logger = logging.getLogger(__name__)
 
 # LlamaIndex imports with fallback
 try:
     from llama_index.core.program import LLMTextCompletionProgram
-    from llama_index.llms.ollama import Ollama
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
-    Ollama = None
-
-
-def _create_llm() -> Optional[Ollama]:
-    """Create LlamaIndex Ollama LLM instance."""
-    if not LLAMAINDEX_AVAILABLE:
-        return None
-    
-    try:
-        config = get_ollama_config()
-        return Ollama(
-            model=config['model'].replace('ollama/', ''),
-            base_url=config['api_base'],
-            temperature=config['temperature'],
-            request_timeout=600.0
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Ollama LLM: {e}")
-        return None
 
 
 def _filter_antibiotics_with_llm(
@@ -85,7 +64,7 @@ def _filter_antibiotics_with_llm(
             'filtered_out': []
         }
     
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.warning("LlamaIndex LLM not available, skipping antibiotic filtering")
         return {
@@ -97,14 +76,27 @@ def _filter_antibiotics_with_llm(
     antibiotic_list = "\n".join([f"- {ab}" for ab in unique_antibiotics])
     
     # Format prompt
+    # Build conditional resistance gene sections
+    if resistant_gene:
+        resistance_context = f" | Resistance: {resistant_gene}"
+        resistance_decision_step = "2. Resistance genes affect ALL pathogens? YES→filter, NO→continue\n"
+        resistance_genes_evaluation = f"""RESISTANCE GENES: Evaluate per pathogen separately. Example: mecA affects beta-lactams in S. aureus but not E. faecalis. dfrA affects trimethoprim in BOTH → filter TMP-SMX.
+"""
+    else:
+        resistance_context = ""
+        resistance_decision_step = ""
+        resistance_genes_evaluation = ""
+    
     prompt = ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE.format(
         pathogen_display=pathogen_display,
-        resistant_gene=resistant_gene,
+        resistance_context=resistance_context,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
         sample=sample or 'Not specified',
         systemic='Yes' if systemic else 'No',
-        antibiotic_list=antibiotic_list
+        antibiotic_list=antibiotic_list,
+        resistance_decision_step=resistance_decision_step,
+        resistance_genes_evaluation=resistance_genes_evaluation
     )
     
     attempt = 0
@@ -466,7 +458,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             pathogen_display = format_pathogens(pathogens) if pathogens else "unknown"
             
             resistant_genes = get_resistance_genes_from_input(input_params)
-            resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else "unknown"
+            resistant_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
             
             severity_codes = get_icd_names_from_state(state)
             age = input_params.get('age')

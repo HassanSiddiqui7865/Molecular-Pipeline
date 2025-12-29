@@ -10,39 +10,18 @@ from collections import defaultdict
 
 from schemas import UnifiedResistanceGenesResult, UnifiedAntibioticEntryForSynthesis
 from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE
-from utils import format_resistance_genes, get_icd_names_from_state
-from config import get_ollama_config
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm, clean_null_strings
 
 logger = logging.getLogger(__name__)
 
 # LlamaIndex imports with fallback
 try:
     from llama_index.core.program import LLMTextCompletionProgram
-    from llama_index.llms.ollama import Ollama
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
-    Ollama = None
-
-
-def _create_llm() -> Optional[Ollama]:
-    """Create LlamaIndex Ollama LLM instance."""
-    if not LLAMAINDEX_AVAILABLE:
-        return None
-    
-    try:
-        config = get_ollama_config()
-        return Ollama(
-            model=config['model'].replace('ollama/', ''),
-            base_url=config['api_base'],
-            temperature=config['temperature'],
-            request_timeout=600.0
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Ollama LLM: {e}")
-        return None
 
 
 def _normalize_antibiotic_name(name: str) -> str:
@@ -63,16 +42,6 @@ def _normalize_antibiotic_name(name: str) -> str:
     return normalized
 
 
-def _clean_null_strings(data: Any) -> Any:
-    """Recursively convert string 'null' values to actual None/null."""
-    if isinstance(data, dict):
-        return {k: _clean_null_strings(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [_clean_null_strings(item) for item in data]
-    elif isinstance(data, str) and data.lower() == 'null':
-        return None
-    else:
-        return data
 
 
 def _unify_antibiotic_group_with_llm(
@@ -103,9 +72,9 @@ def _unify_antibiotic_group_with_llm(
         return entry
     
     # Build prompt with all entries
-    entries_text = []
+        entries_text = []
     for i, entry in enumerate(entries, 1):
-        source_idx = entry.get('source_index', i)
+            source_idx = entry.get('source_index', i)
         original_category = entry.get('original_category', 'unknown')
         
         entries_text.append(
@@ -127,7 +96,7 @@ def _unify_antibiotic_group_with_llm(
         entries_list=entries_list
     )
 
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.warning("LlamaIndex LLM not available, using first entry")
         entry = entries[0].copy()
@@ -153,8 +122,8 @@ def _unify_antibiotic_group_with_llm(
                 logger.warning(f"Empty result for {antibiotic_name} (attempt {attempt}), retrying...")
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-                continue
-            
+            continue
+        
             result_dict = result.model_dump()
             
             unified = {
@@ -285,7 +254,7 @@ def _unify_resistance_genes_with_llm(
         genes_list=genes_list
     )
 
-    llm = _create_llm()
+    llm = create_llm()
     if not llm:
         logger.warning("LlamaIndex LLM not available, using first entry from each group")
         unified_genes = []
@@ -318,7 +287,7 @@ def _unify_resistance_genes_with_llm(
             resistance_genes = result_dict.get('resistance_genes', [])
             
             if resistance_genes:
-                return [_clean_null_strings(entry) for entry in resistance_genes]
+                return [clean_null_strings(entry) for entry in resistance_genes]
             else:
                 logger.warning(f"LLM returned no resistance genes (attempt {attempt}), retrying...")
                 logger.info(f"Retrying in {retry_delay} seconds...")

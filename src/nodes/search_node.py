@@ -3,7 +3,6 @@ Search node for LangGraph - Performs Perplexity search.
 """
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Dict, Any, List
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 # Search prompt template for pathogen information extraction
-SEARCH_PROMPT_TEMPLATE = """Evidence-based antibiotic dosing regimens for {pathogen_name} with {resistant_gene} resistance, specifying drug names, adult dosing (mg/kg or mg), dosing frequency, route of administration, and treatment duration, with brief antimicrobial stewardship considerations{severity_codes_text}"""
+SEARCH_PROMPT_TEMPLATE = """Evidence-based antibiotic dosing regimens for {pathogen_name}{resistance_phrase}, specifying drug names, adult dosing (mg/kg or mg), dosing frequency, route of administration, and treatment duration, with brief antimicrobial stewardship considerations{severity_codes_text}"""
 
 class PerplexitySearch:
     """Wrapper for Perplexity Search API using the official SDK."""
@@ -113,16 +112,24 @@ def format_search_query(**kwargs) -> str:
     Format the search template with dynamic inputs.
     
     Args:
-        **kwargs: Values to fill in the template (pathogen_name, resistant_gene)
+        **kwargs: Values to fill in the template (pathogen_name, resistant_gene, severity_codes_text)
         
     Returns:
         Formatted query string
     """
     try:
+        # Build conditional resistance phrase
+        resistant_gene = kwargs.get('resistant_gene')
+        if resistant_gene:
+            resistance_phrase = f" with {resistant_gene} resistance"
+        else:
+            resistance_phrase = ""
+        
+        kwargs['resistance_phrase'] = resistance_phrase
         return SEARCH_PROMPT_TEMPLATE.format(**kwargs)
     except KeyError as e:
         logger.error(f"Missing template parameter: {e}")
-        logger.error(f"Required parameters: pathogen_name, resistant_gene")
+        logger.error(f"Required parameter: pathogen_name")
         return SEARCH_PROMPT_TEMPLATE
 
 
@@ -169,10 +176,10 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         pathogens = get_pathogens_from_input(input_params)
         pathogen_name = format_pathogens(pathogens)
         
-        # Get resistance genes
+        # Get resistance genes (returns None if empty)
         from utils import get_resistance_genes_from_input, format_resistance_genes
         resistant_genes = get_resistance_genes_from_input(input_params)
-        resistant_gene = format_resistance_genes(resistant_genes)
+        resistant_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
         
         # Get transformed ICD codes if available, otherwise use original
         icd_transformation = state.get('icd_transformation', {})

@@ -1,7 +1,25 @@
 """
 Utility functions for the Molecular Pipeline.
 """
-from typing import Optional, List, Dict, Any
+import logging
+import time
+from typing import Optional, List, Dict, Any, TypeVar, Callable, Type
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+# LlamaIndex imports with fallback
+try:
+    from llama_index.core.program import LLMTextCompletionProgram
+    from llama_index.llms.ollama import Ollama
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
+    LLAMAINDEX_AVAILABLE = False
+    LLMTextCompletionProgram = None
+    Ollama = None
+
+T = TypeVar('T', bound=BaseModel)
 
 
 def fix_text_encoding(text: Optional[str]) -> str:
@@ -73,7 +91,7 @@ def fix_text_encoding(text: Optional[str]) -> str:
     return text.strip()
 
 
-def format_resistance_genes(resistant_genes: List[str]) -> str:
+def format_resistance_genes(resistant_genes: List[str]) -> Optional[str]:
     """
     Format resistance genes list to readable format.
     
@@ -81,15 +99,15 @@ def format_resistance_genes(resistant_genes: List[str]) -> str:
         resistant_genes: List of resistance genes (e.g., ["vanA", "mecA"])
         
     Returns:
-        Formatted string for use in prompts (e.g., "vanA and mecA" or "vanA")
+        Formatted string for use in prompts (e.g., "vanA and mecA" or "vanA"), or None if empty
     """
     if not resistant_genes:
-        return "unknown"
+        return None
     
     genes = [gene.strip() for gene in resistant_genes if gene and str(gene).strip()]
     
     if not genes:
-        return "unknown"
+        return None
     
     if len(genes) == 1:
         return genes[0]
@@ -263,3 +281,113 @@ def get_severity_codes_from_input(input_params: Dict[str, Any]) -> List[str]:
         return []
     
     return [str(c).strip().upper() for c in codes if c and str(c).strip()]
+
+
+def create_llm() -> Optional[Ollama]:
+    """
+    Create LlamaIndex Ollama LLM instance.
+    Shared utility function used across all nodes.
+    
+    Returns:
+        Ollama LLM instance or None if unavailable
+    """
+    if not LLAMAINDEX_AVAILABLE:
+        return None
+    
+    try:
+        from config import get_ollama_config
+        config = get_ollama_config()
+        return Ollama(
+            model=config['model'].replace('ollama/', ''),
+            base_url=config['api_base'],
+            temperature=config['temperature'],
+            request_timeout=600.0
+        )
+    except Exception as e:
+        logger.error(f"Failed to create Ollama LLM: {e}")
+        return None
+
+
+def clean_null_strings(data: Any) -> Any:
+    """
+    Recursively convert string 'null' values to actual None/null.
+    Shared utility function for cleaning LLM output.
+    
+    Args:
+        data: Data structure (dict, list, or primitive) to clean
+        
+    Returns:
+        Cleaned data structure with 'null' strings converted to None
+    """
+    if isinstance(data, dict):
+        return {k: clean_null_strings(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_null_strings(item) for item in data]
+    elif isinstance(data, str) and data.lower() == 'null':
+        return None
+    else:
+        return data
+
+
+def call_llm_with_retry(
+    output_cls: Type[T],
+    prompt: str,
+    llm: Optional[Ollama],
+    retry_delay: float = 2.0,
+    max_attempts: Optional[int] = None,
+    operation_name: str = "LLM operation",
+    empty_result_handler: Optional[Callable[[], Optional[T]]] = None
+) -> Optional[T]:
+    """
+    Call LLM with structured output and infinite retry logic.
+    Shared utility function for all LLM calls across nodes.
+    
+    Args:
+        output_cls: Pydantic model class for structured output
+        prompt: Prompt string to send to LLM
+        llm: Ollama LLM instance (can be None)
+        retry_delay: Delay between retries in seconds
+        max_attempts: Maximum number of attempts (None = infinite)
+        operation_name: Name of operation for logging
+        empty_result_handler: Optional function to call if result is empty
+        
+    Returns:
+        Parsed result as output_cls instance, or None if max_attempts reached
+    """
+    if not LLAMAINDEX_AVAILABLE or not llm:
+        logger.warning(f"{operation_name}: LLM not available")
+        return None
+    
+    attempt = 0
+    while True:
+        attempt += 1
+        if max_attempts and attempt > max_attempts:
+            logger.error(f"{operation_name}: Max attempts ({max_attempts}) reached, giving up")
+            return None
+        
+        try:
+            program = LLMTextCompletionProgram.from_defaults(
+                output_cls=output_cls,
+                llm=llm,
+                prompt_template_str="{input_str}",
+                verbose=False
+            )
+            
+            result = program(input_str=prompt)
+            
+            if not result:
+                logger.warning(f"{operation_name}: Empty result (attempt {attempt}), retrying...")
+                if empty_result_handler:
+                    fallback = empty_result_handler()
+                    if fallback is not None:
+                        return fallback
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                continue
+            
+            return result
+            
+        except Exception as e:
+            logger.warning(f"{operation_name}: Error (attempt {attempt}): {e}")
+            logger.info(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)

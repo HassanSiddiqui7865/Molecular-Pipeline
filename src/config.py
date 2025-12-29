@@ -58,30 +58,6 @@ def get_output_config() -> Dict[str, Any]:
     }
 
 
-def get_ollama_llm() -> Any:
-    """
-    Get LangChain BaseChatModel for Ollama.
-    
-    Returns:
-        LangChain BaseChatModel instance
-    """
-    from langchain_ollama import ChatOllama
-    from langchain_core.language_models.chat_models import BaseChatModel
-    
-    ollama_config = get_ollama_config()
-    model = ollama_config['model'].replace('ollama/', '')
-    base_url = ollama_config['api_base']
-    
-    llm: BaseChatModel = ChatOllama(
-        model=model,
-        base_url=base_url,
-        format='json',
-        temperature=ollama_config['temperature'],
-    )
-    
-    return llm
-
-
 def get_perplexity_config() -> Dict[str, Any]:
     """
     Get Perplexity configuration from environment variables.
@@ -96,32 +72,6 @@ def get_perplexity_config() -> Dict[str, Any]:
         'max_tokens_per_page': int(os.getenv('PERPLEXITY_MAX_TOKENS_PER_PAGE', '4096')),
         'max_search_results': int(os.getenv('PERPLEXITY_MAX_SEARCH_RESULTS', '5'))
     }
-
-
-def get_openai_llm(model: str = "gpt-4o-mini", temperature: float = 0) -> Any:
-    """
-    Get LangChain ChatOpenAI instance.
-    
-    Args:
-        model: OpenAI model name (default: "gpt-4o-mini")
-        temperature: Temperature for the model (default: 0)
-    
-    Returns:
-        LangChain ChatOpenAI instance
-    """
-    from langchain_openai import ChatOpenAI
-    
-    _ensure_env_loaded()
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment variables. Please set it in .env file")
-    
-    llm = ChatOpenAI(
-        model=model,
-        temperature=temperature
-    )
-    
-    return llm
 
 
 def get_database_config() -> Dict[str, Any]:

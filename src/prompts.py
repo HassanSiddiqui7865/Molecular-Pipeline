@@ -6,11 +6,11 @@ from typing import List, Optional, Dict
 
 EXTRACTION_PROMPT_TEMPLATE = """Extract antibiotic therapy recommendations from medical content.
 
-CONTEXT: Pathogen: {pathogen_display} | Resistance: {resistant_gene} | Severity: {severity_codes} | Age: {age}, Sample: {sample}, Systemic: {systemic}
+CONTEXT: Pathogen: {pathogen_display}{resistance_context} | Severity: {severity_codes} | Age: {age}, Sample: {sample}, Systemic: {systemic}
 
 SOURCE: {content}
 
-TASK: Extract only antibiotics effective against {pathogen_display} with {resistant_gene} resistance. Extract ALL available information - do not leave fields null if data exists.
+TASK: Extract only antibiotics effective against {pathogen_display}{resistance_task}. Extract ALL available information - do not leave fields null if data exists.
 
 FIELDS:
 
@@ -28,22 +28,17 @@ renal_adjustment: "No Renal Adjustment" if explicitly stated. If CrCl threshold 
 
 general_considerations: Extract monitoring ("monitor", "watch for"), warnings, toxicity, interactions, contraindications. Separate with semicolons. Exclude dosing, drug class descriptions, efficacy. Use null only if no safety/monitoring info exists.
 
-RESISTANCE GENES (for each in {resistant_gene}):
-- detected_resistant_gene_name: Exact name ("mecA", "tetM", "dfrA", "Ant-la")
-- potential_medication_class_affected: Classes affected. Look for: "beta-lactams", "penicillins", "cephalosporins", "tetracyclines", "trimethoprim", "aminoglycosides", "TMP-SMX". Infer from mechanism (e.g., "methicillin resistance" → beta-lactams) or specific drugs mentioned. Use knowledge: mecA→beta-lactams, tetM→tetracyclines, dfrA→trimethoprim/TMP-SMX, Ant-la→aminoglycosides. Use null only if no info exists.
-- general_considerations: Mechanism/how gene confers resistance. Use null only if no mechanism info exists.
-
-CRITICAL RULES:
+{resistance_genes_section}CRITICAL RULES:
 1. Formatting: BID→q12h, TID→q8h, QD/daily→q24h. Slashes→"plus" for combinations.
 2. Extraction: Extract aggressively - use all available info. For duplicates, use most complete. Keep ranges intact. Include duration when mentioned anywhere.
-3. Filtering: DO NOT extract antibiotics ineffective due to {resistant_gene}. Example: mecA present → skip oxacillin, nafcillin, methicillin, cefazolin, other beta-lactams ineffective against MRSA. Only extract antibiotics retaining activity.
+{resistance_filtering_rule}
 4. Validation: Each antibiotic in one category. Normalize combinations. Never extract resistance genes as antibiotics.
 
 DO NOT EXTRACT: Resistance genes as antibiotics. Ineffective antibiotics (filtered by resistance). Drug classes without specific names. Experimental drugs (unless recommended)."""
 
 ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE = """Evaluate each antibiotic: KEEP or FILTER OUT based on clinical appropriateness.
 
-CONTEXT: Pathogen(s): {pathogen_display} | Resistance: {resistant_gene} | Severity: {severity_codes} | Age: {age} | Sample: {sample} | Systemic: {systemic}
+CONTEXT: Pathogen(s): {pathogen_display}{resistance_context} | Severity: {severity_codes} | Age: {age} | Sample: {sample} | Systemic: {systemic}
 
 CANDIDATES: {antibiotic_list}
 
@@ -74,15 +69,14 @@ FILTERING CRITERIA (apply in order):
 
 DECISION FRAMEWORK (exact order):
 1. Effective against ≥1 pathogen? YES→continue, NO→filter "Ineffective"
-2. Resistance genes affect ALL pathogens? YES→filter, NO→continue
-3. Absolute safety contraindication? YES→filter, NO→continue
+{resistance_decision_step}3. Absolute safety contraindication? YES→filter, NO→continue
 4. Clearly clinically inappropriate? YES→filter, NO→continue
 5. Explicitly contraindicated in guidelines (says "do not use" or "avoid")? YES→filter, NO→continue. Note: "alternative" or "not first-line" = KEEP.
 6. DEFAULT: KEEP (when uncertain, include)
 
 MULTI-PATHOGEN RULE: Effective against S. aureus but NOT E. faecalis → KEEP. Effective against E. faecalis but NOT S. aureus → KEEP. Effective against NEITHER → FILTER OUT. Reasoning: "effective against [pathogen] but not [other]" for partial coverage.
 
-RESISTANCE GENES: Evaluate per pathogen separately. Example: mecA affects beta-lactams in S. aureus but not E. faecalis. dfrA affects trimethoprim in BOTH → filter TMP-SMX.
+{resistance_genes_evaluation}
 
 FILTERING REASON FORMAT:
 - "Ineffective: No activity against any listed pathogen"
@@ -169,7 +163,7 @@ Return is_match=True if same drug, is_match=False if different drug."""
 
 DOSAGE_EXTRACTION_PROMPT_TEMPLATE = """Extract ONLY missing fields for {medical_name} from drugs.com content.
 
-PATIENT: Age={patient_age} | ICD={icd_codes} | Gene={resistance_gene}
+PATIENT: Age={patient_age} | ICD={icd_codes}{gene_context}
 
 MISSING FIELDS (extract ONLY these): {missing_fields}
 
@@ -181,7 +175,7 @@ EXISTING DATA (context only, preserve if not missing):
 
 FIELDS (extract ONLY if in missing_fields):
 
-dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Match ICD: {icd_codes}, Gene: {resistance_gene}, Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. Choose ONE most appropriate. Use null if no dosing info.
+dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Match ICD: {icd_codes}{gene_matching}, Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. Choose ONE most appropriate. Use null if no dosing info.
 
 route_of_administration: Extract from explicit mentions or infer from dosing. Values: "IV", "PO", "IM", or "IV/PO". Use null if no route info.
 
@@ -193,7 +187,7 @@ general_considerations: Extract monitoring, warnings, toxicity, interactions, co
 
 CRITICAL RULES:
 1. Extract ONLY fields in missing_fields - preserve existing for others
-2. Match dose_duration to ICD: {icd_codes}, Gene: {resistance_gene}, Age: {patient_age}
+2. Match dose_duration to ICD: {icd_codes}{gene_matching}, Age: {patient_age}
 3. Frequency MUST include "q" prefix (q8h, q12h, q24h)
 4. DO NOT invent information - use only what's in content
 5. Maintain consistency with existing data AND previous chunks context
