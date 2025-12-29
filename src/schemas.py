@@ -101,3 +101,18 @@ class UnifiedAntibioticEntryForSynthesis(BaseModel):
     general_considerations: Optional[str] = None
     is_combined: bool = False
     is_complete: bool = False
+
+
+class AntibioticMatchResult(BaseModel):
+    """Schema for antibiotic match validation."""
+    is_match: bool
+    reason: str
+
+
+class DosageExtractionResult(BaseModel):
+    """Schema for extracted dosage information from drugs.com."""
+    dose_duration: Optional[str] = None
+    route_of_administration: Optional[str] = None
+    general_considerations: Optional[str] = None
+    coverage_for: Optional[str] = None
+    renal_adjustment: Optional[str] = None

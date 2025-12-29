@@ -92,9 +92,9 @@ def get_perplexity_config() -> Dict[str, Any]:
     _ensure_env_loaded()
     return {
         'api_key': os.getenv('PERPLEXITY_API_KEY', ''),
-        'max_tokens': int(os.getenv('PERPLEXITY_MAX_TOKENS', '50000')),
+        'max_tokens': int(os.getenv('PERPLEXITY_MAX_TOKENS', '5000')),
         'max_tokens_per_page': int(os.getenv('PERPLEXITY_MAX_TOKENS_PER_PAGE', '4096')),
-        'max_search_results': int(os.getenv('PERPLEXITY_MAX_SEARCH_RESULTS', '10'))
+        'max_search_results': int(os.getenv('PERPLEXITY_MAX_SEARCH_RESULTS', '5'))
     }
 
 

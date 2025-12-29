@@ -1,22 +1,55 @@
 """
 Enrichment node for LangGraph - Enriches missing dosage information from drugs.com using Selenium.
-Uses LangGraph memory store to store previous chunk context to avoid randomness.
+Uses LlamaIndex for structured extraction.
 Only processes entries where is_complete is False.
 """
 import logging
+import json
 import re
 from typing import Dict, Any, Optional, List, Tuple
 from urllib.parse import quote_plus
+from pathlib import Path
 import time
 import random
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from langgraph.store.memory import InMemoryStore
-from langgraph.store.base import BaseStore
-
 from utils import format_resistance_genes, get_icd_names_from_state
+from config import get_ollama_config
+from schemas import AntibioticMatchResult, DosageExtractionResult
+from prompts import ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE, DOSAGE_EXTRACTION_PROMPT_TEMPLATE
+
+logger = logging.getLogger(__name__)
+
+# LlamaIndex imports with fallback
+try:
+    from llama_index.core.program import LLMTextCompletionProgram
+    from llama_index.llms.ollama import Ollama
+    from llama_index.core.node_parser import SentenceSplitter
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
+    LLAMAINDEX_AVAILABLE = False
+    LLMTextCompletionProgram = None
+    Ollama = None
+    SentenceSplitter = None
+
+# NLTK imports with fallback
+try:
+    import nltk
+    NLTK_AVAILABLE = True
+    # Download punkt tokenizer if not already downloaded
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        logger.info("Downloading NLTK punkt tokenizer...")
+        nltk.download('punkt', quiet=True)
+except ImportError:
+    logger.error("NLTK not available. Install: pip install nltk")
+    NLTK_AVAILABLE = False
+except Exception as e:
+    logger.warning(f"NLTK setup issue: {e}")
+    NLTK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -201,27 +234,48 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         return None
 
 
+def _create_llm() -> Optional[Ollama]:
+    """Create LlamaIndex Ollama LLM instance."""
+    if not LLAMAINDEX_AVAILABLE:
+        return None
+    
+    try:
+        config = get_ollama_config()
+        return Ollama(
+            model=config['model'].replace('ollama/', ''),
+            base_url=config['api_base'],
+            temperature=config['temperature'],
+            request_timeout=600.0
+        )
+    except Exception as e:
+        logger.error(f"Failed to create Ollama LLM: {e}")
+        return None
+
+
 def _validate_antibiotic_match(
     url: str,
     antibiotic_name: str,
-    driver: Any,
-    llm: BaseChatModel
+    driver: Any
 ) -> bool:
     """
     Validate that the drugs.com page is for the same antibiotic we're searching for.
-    Uses LLM to verify medical match based on page title.
+    Uses LlamaIndex to verify medical match based on page title.
     
     Args:
         url: URL of the drugs.com page
         antibiotic_name: Name of the antibiotic we're searching for
         driver: Selenium WebDriver instance
-        llm: LangChain BaseChatModel for validation
         
     Returns:
         True if the page matches the antibiotic, False otherwise
     """
-    if not driver or not llm:
+    if not driver:
         return False
+    
+    llm = _create_llm()
+    if not llm:
+        logger.warning("LLM not available for validation, allowing match")
+        return True
     
     try:
         logger.info(f"Validating antibiotic match for {antibiotic_name} at {url}...")
@@ -237,26 +291,25 @@ def _validate_antibiotic_match(
             logger.warning(f"No page title found for {url}, skipping validation")
             return True  # Fail open if no title
         
-        # Use LLM to validate match based on title only
-        from pydantic import BaseModel, Field
+        # Format prompt
+        prompt = ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE.format(
+            antibiotic_name=antibiotic_name,
+            page_title=page_title
+        )
         
-        class AntibioticMatchResult(BaseModel):
-            """Schema for antibiotic match validation."""
-            is_match: bool = Field(..., description="True if the page title indicates this is about the same antibiotic we're searching for, False otherwise")
-            reason: str = Field(..., description="Brief explanation of why it matches or doesn't match")
+        # Use LlamaIndex for structured extraction
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=AntibioticMatchResult,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
         
-        structured_llm = llm.with_structured_output(AntibioticMatchResult)
+        result = program(input_str=prompt)
         
-        prompt = f"""Validate if drugs.com page matches the antibiotic we're searching for.
-
-SEARCHING FOR: {antibiotic_name}
-PAGE TITLE: {page_title}
-
-TASK: Determine if page title indicates the same drug (same active ingredient/medically equivalent).
-
-Return is_match=True if same drug, is_match=False if different drug."""
-        
-        result = structured_llm.invoke(prompt)
+        if not result:
+            logger.warning(f"Empty validation result for {antibiotic_name}, allowing match")
+            return True
         
         is_match = result.is_match
         reason = result.reason
@@ -330,8 +383,51 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
         return None
 
 
-def _chunk_text(text: str, chunk_size: int = 6000, overlap: int = 500) -> List[str]:
+def _chunk_text_with_llamaindex(text: str, chunk_size: int = 6000, chunk_overlap: int = 200) -> List[str]:
     """
+    Split text into chunks using LlamaIndex's SentenceSplitter with NLTK.
+    Maintains sentence boundaries and overlap for cross-chunk context.
+    
+    Args:
+        text: Text to chunk
+        chunk_size: Maximum size of each chunk in characters
+        chunk_overlap: Number of characters to overlap between chunks
+        
+    Returns:
+        List of text chunks
+    """
+    if not LLAMAINDEX_AVAILABLE or not NLTK_AVAILABLE:
+        logger.warning("LlamaIndex or NLTK not available, using fallback chunking")
+        return _chunk_text_fallback(text, chunk_size, chunk_overlap)
+    
+    try:
+        # Create SentenceSplitter with specified chunk size and overlap
+        splitter = SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separator=" ",
+            paragraph_separator="\n\n"
+        )
+        
+        # Split text into nodes (chunks)
+        from llama_index.core.schema import Document
+        doc = Document(text=text)
+        nodes = splitter.get_nodes_from_documents([doc])
+        
+        # Extract text from nodes
+        chunks = [node.text for node in nodes]
+        
+        logger.debug(f"Split text into {len(chunks)} chunks using LlamaIndex SentenceSplitter")
+        return chunks
+        
+    except Exception as e:
+        logger.warning(f"Error using LlamaIndex SentenceSplitter: {e}, using fallback")
+        return _chunk_text_fallback(text, chunk_size, chunk_overlap)
+
+
+def _chunk_text_fallback(text: str, chunk_size: int = 6000, overlap: int = 200) -> List[str]:
+    """
+    Fallback chunking method if LlamaIndex/NLTK is not available.
     Split text into chunks with overlap to avoid losing context at boundaries.
     
     Args:
@@ -353,6 +449,7 @@ def _chunk_text(text: str, chunk_size: int = 6000, overlap: int = 500) -> List[s
         chunk = text[start:end]
         
         if end < len(text):
+            # Try to break at sentence boundaries
             for punct in ['. ', '.\n', '! ', '!\n', '? ', '?\n']:
                 last_punct = chunk.rfind(punct)
                 if last_punct > chunk_size * 0.7:
@@ -369,125 +466,19 @@ def _chunk_text(text: str, chunk_size: int = 6000, overlap: int = 500) -> List[s
     return chunks
 
 
-def _get_or_create_store(state: Dict[str, Any]) -> BaseStore:
-    """
-    Get or create LangGraph memory store from state.
-    
-    Args:
-        state: Pipeline state dictionary
-        
-    Returns:
-        BaseStore instance
-    """
-    # Ensure metadata exists
-    if 'metadata' not in state:
-        state['metadata'] = {}
-    
-    metadata = state['metadata']
-    
-    # Check if store already exists in metadata
-    if 'enrichment_store' in metadata:
-        store = metadata['enrichment_store']
-        if store is not None:
-            return store
-    
-    # Create new store if it doesn't exist
-    # For production, use a persistent store; for now, use InMemoryStore
-    try:
-        # Simple embedding function for semantic search (optional)
-        def embed(texts: list[str]) -> list[list[float]]:
-            # Return dummy embeddings for now (can be enhanced with actual embeddings)
-            return [[0.0] * 128 for _ in texts]
-        
-        store = InMemoryStore(index={"embed": embed, "dims": 128})
-        metadata['enrichment_store'] = store
-        logger.info("Created new enrichment memory store")
-        return store
-    except Exception as e:
-        logger.warning(f"Error creating store with index, using basic store: {e}")
-        store = InMemoryStore()
-        metadata['enrichment_store'] = store
-        return store
-
-
-def _store_chunk_context(
-    store: BaseStore,
-    medical_name: str,
-    chunk_index: int,
-    chunk_content: str,
-    extracted_fields: Dict[str, Any]
-):
-    """
-    Store chunk context in memory store.
-    
-    Args:
-        store: LangGraph store instance
-        medical_name: Name of the antibiotic
-        chunk_index: Index of the chunk
-        chunk_content: Content of the chunk
-        extracted_fields: Fields extracted from this chunk
-    """
-    try:
-        namespace = ("enrichment", "chunks", medical_name)
-        key = f"chunk_{chunk_index}"
-        
-        value = {
-            "chunk_content": chunk_content[:1000],  # Store first 1000 chars for context
-            "extracted_fields": extracted_fields,
-            "chunk_index": chunk_index
-        }
-        
-        store.put(namespace, key, value)
-        logger.debug(f"Stored chunk context for {medical_name}, chunk {chunk_index}")
-    except Exception as e:
-        logger.warning(f"Error storing chunk context: {e}")
-
-
-def _get_previous_chunk_contexts(
-    store: BaseStore,
-    medical_name: str
-) -> List[Dict[str, Any]]:
-    """
-    Retrieve previous chunk contexts from memory store.
-    
-    Args:
-        store: LangGraph store instance
-        medical_name: Name of the antibiotic
-        
-    Returns:
-        List of previous chunk contexts
-    """
-    try:
-        namespace = ("enrichment", "chunks", medical_name)
-        items = store.search(namespace)
-        
-        contexts = []
-        for item in items:
-            if item.value:
-                contexts.append(item.value)
-        
-        # Sort by chunk_index
-        contexts.sort(key=lambda x: x.get("chunk_index", 0))
-        return contexts
-    except Exception as e:
-        logger.warning(f"Error retrieving chunk contexts: {e}")
-        return []
-
-
-def _extract_fields_with_langchain_memory(
+def _extract_fields_with_llamaindex(
     page_content: str,
     medical_name: str,
     missing_fields: List[str],
     existing_data: Dict[str, Any],
     age: Optional[int],
-    llm: BaseChatModel,
-    store: BaseStore,
     icd_code_names: Optional[str] = None,
-    resistance_gene: Optional[str] = None
+    resistance_gene: Optional[str] = None,
+    retry_delay: float = 2.0
 ) -> Dict[str, Optional[str]]:
     """
-    Use LangChain structured output to extract fields, using memory to store/retrieve chunk contexts.
-    Blends extracted fields with existing data to avoid randomness.
+    Use LlamaIndex structured output to extract fields from drugs.com content.
+    Blends extracted fields with existing data.
     
     Args:
         page_content: Extracted content from drugs.com page
@@ -495,43 +486,27 @@ def _extract_fields_with_langchain_memory(
         missing_fields: List of field names that are missing
         existing_data: Existing data for this antibiotic (to blend with)
         age: Patient age (optional)
-        llm: LangChain BaseChatModel
-        store: LangGraph store for memory
         icd_code_names: Transformed ICD code names (comma-separated, optional)
         resistance_gene: Resistance gene name (optional)
+        retry_delay: Initial delay between retries in seconds
         
     Returns:
         Dictionary with extracted field values (blended with existing data)
     """
+    if not LLAMAINDEX_AVAILABLE:
+        logger.error("LlamaIndex not available for extraction")
+        return {}
+    
+    llm = _create_llm()
+    if not llm:
+        logger.error("LLM not available for extraction")
+        return {}
+    
     try:
-        from pydantic import BaseModel, Field
-        
-        class DosageExtractionResult(BaseModel):
-            """Schema for extracted dosage information."""
-            dose_duration: Optional[str] = Field(None, description="Dosing information in natural text format including ALL dosages (loading and maintenance) in concise way. MUST match the specific ICD code conditions and consider resistance gene and patient age. Examples: '600 mg IV q12h for 14 days', 'Loading: 1g IV, then 500 mg q12h for 7-14 days', '450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days', 'Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days'. EXCLUDE monitoring details, target levels, infusion rates, administration notes (place in general_considerations). Include loading doses if present - keep concise and natural. DO NOT create duplicates - choose ONE most appropriate dosage. Use existing value if already present, otherwise extract from content.")
-            route_of_administration: Optional[str] = Field(None, description="Route of administration. Must be one of: 'IV', 'PO', 'IM', 'IV/PO'. Examples: 'IV', 'PO', 'IV/PO'. Use existing value if already present, otherwise extract from content.")
-            general_considerations: Optional[str] = Field(None, description="Clinical notes and considerations. If dose_duration contains multiple dosages (separated by |), mention which condition from ICD codes each dosage is for. Examples: 'Monitor renal function, risk of nephrotoxicity' or 'For bacteremia: 600 mg IV q12h. For pneumonia: 500 mg PO q8h. Monitor renal function.'. Use existing value if already present, otherwise extract from content.")
-            coverage_for: Optional[str] = Field(None, description="Conditions or infections this antibiotic covers using clinical terminology only (e.g., 'MRSA bacteremia', 'VRE bacteremia', 'Staphylococcus aureus bacteremia'). Do NOT include ICD codes (e.g., A41.2) or ICD code names (e.g., 'Sepsis due to...'). Use clinical terms like 'bacteremia', 'sepsis', 'endocarditis'. Use existing value if already present, otherwise extract from content.")
-            renal_adjustment: Optional[str] = Field(None, description="Renal adjustment or dosing guidelines for patients with renal impairment. Be concise and factual - NO repetition, NO references, NO citations. Extract only essential adjustment information. Examples: 'Adjust dose in CrCl < 30 mL/min' or 'No adjustment needed' or 'Reduce dose by 50% in CrCl < 30 mL/min'. Use existing value if already present, otherwise extract from content.")
-        
         patient_age_str = f"{age} years" if age else "adult"
         missing_fields_str = ", ".join(missing_fields)
         icd_code_names_str = icd_code_names if icd_code_names else "none"
         resistance_gene_str = resistance_gene if resistance_gene else "none"
-        
-        # Get previous chunk contexts from memory
-        previous_contexts = _get_previous_chunk_contexts(store, medical_name)
-        
-        # Build context summary from previous chunks
-        previous_context_summary = ""
-        if previous_contexts:
-            previous_context_summary = "\n\nPREVIOUS CHUNK CONTEXTS (for consistency):\n"
-            for ctx in previous_contexts[-3:]:  # Last 3 chunks
-                prev_fields = ctx.get("extracted_fields", {})
-                if prev_fields:
-                    prev_summary = ", ".join([f"{k}={v}" for k, v in prev_fields.items() if v])
-                    if prev_summary:
-                        previous_context_summary += f"- {prev_summary}\n"
         
         # Build existing data context
         existing_data_context = ""
@@ -549,13 +524,14 @@ def _extract_fields_with_langchain_memory(
                 existing_fields.append(f"general_considerations={existing_data['general_considerations'][:100]}")
             
             if existing_fields:
-                existing_data_context = f"\n\nEXISTING DATA (preserve and blend with):\n" + "\n".join(existing_fields)
+                existing_data_context = "\n".join(existing_fields)
         
-        # Chunk the content if it's too large
+        # Chunk the content using LlamaIndex SentenceSplitter
         chunk_size = 6000
-        chunks = _chunk_text(page_content, chunk_size=chunk_size, overlap=500)
+        chunk_overlap = 200  # Overlap for cross-chunk context
+        chunks = _chunk_text_with_llamaindex(page_content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         
-        logger.info(f"[LangChain+Memory] Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
+        logger.info(f"Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
         
         # Process each chunk and accumulate results
         all_results = {
@@ -566,100 +542,82 @@ def _extract_fields_with_langchain_memory(
             'renal_adjustment': []
         }
         
-        structured_llm = llm.with_structured_output(DosageExtractionResult)
+        # Track previous chunks' extracted fields for cross-chunk context
+        previous_chunks_context = []
         
+        attempt = 0
         for i, chunk in enumerate(chunks):
-            try:
-                logger.debug(f"[LangChain+Memory] Processing chunk {i+1}/{len(chunks)} for {medical_name}")
-                
-                prompt = f"""Extract ONLY missing fields for {medical_name} from drugs.com content.
-Be ACCURATE - extract dosages matching patient conditions.
-
-PATIENT: Name={medical_name} | Age={patient_age_str} | ICD={icd_code_names_str} | Gene={resistance_gene_str}
-
-MISSING FIELDS (extract ONLY these): {missing_fields_str}
-
-EXISTING DATA (context only, do NOT extract):
-{existing_data_context}
-
-PREVIOUS CHUNK CONTEXTS:
-{previous_context_summary}
-
-PAGE CONTENT (chunk {i+1} of {len(chunks)}):
-{chunk}
-
-DOSAGE EXTRACTION RULES:
-1. Extract dosages SPECIFICALLY appropriate for ICD: {icd_code_names_str}
-2. Consider Resistance Gene: {resistance_gene_str}
-3. Consider Patient Age: {patient_age_str} (pediatric vs adult)
-4. DO NOT extract duplicates - choose ONE most appropriate
-5. Include loading doses if present - keep concise and natural (e.g., "Loading: 1g IV, then 500 mg q12h for 7-14 days")
-6. Extract ONLY dosage(s) relevant to ICD: {icd_code_names_str}
-7. Frequency MUST include "q" prefix: q8h, q12h, q24h (NEVER just 8h, 12h, 24h)
-8. Be precise - no variations or duplicates
-
-CONSISTENCY:
-- Use existing fields as context
-- Extracted fields must be medically consistent
-- All fields must work together logically
-
-INSTRUCTIONS:
-1. Extract ONLY fields in missing_fields: {missing_fields_str}
-2. Return existing values for fields NOT in missing_fields
-3. Match dose_duration to ICD: {icd_code_names_str}, Gene: {resistance_gene_str}, Age: {patient_age_str}
-4. Maintain consistency with previous chunk contexts
-
-FIELD DESCRIPTIONS (extract ONLY if in missing_fields):
-- dose_duration: Natural text format including ALL dosages (loading and maintenance) in concise way (e.g., "600 mg IV q12h for 14 days", "Loading: 1g IV, then 500 mg q12h for 7-14 days", "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days")
-  * Match ICD: {icd_code_names_str}, Gene: {resistance_gene_str}, Age: {patient_age_str}
-  * Frequency MUST include "q" prefix (q8h, q12h, q24h)
-  * Include loading doses if present - keep concise and natural (e.g., "Loading: 1g IV, then 500 mg q12h for 7-14 days")
-  * NO duplicates - choose ONE most appropriate
-- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO'
-- general_considerations: Clinical notes. If multiple dosages, mention which ICD condition each is for
-- coverage_for: Conditions matching patient's clinical condition using clinical terminology only (e.g., "MRSA bacteremia", "VRE bacteremia")
-- renal_adjustment: Concise adjustment info (NO repetition/references/citations)
-  Examples: "Adjust dose in CrCl < 30 mL/min" or "No adjustment needed"
-
-CRITICAL:
-- Extract ONLY missing fields - return existing for others
-- Use ICD, Gene, Age for ACCURATE dosages
-- NO duplicates or conflicting dosages
-- Include loading doses if present - keep concise and natural
-- Accuracy > completeness"""
-                
-                result = structured_llm.invoke(prompt)
-                
-                # Store chunk context in memory
-                extracted_from_chunk = {}
-                if result.dose_duration:
-                    extracted_from_chunk['dose_duration'] = result.dose_duration
-                if result.route_of_administration:
-                    extracted_from_chunk['route_of_administration'] = result.route_of_administration
-                if result.general_considerations:
-                    extracted_from_chunk['general_considerations'] = result.general_considerations
-                if result.coverage_for:
-                    extracted_from_chunk['coverage_for'] = result.coverage_for
-                if result.renal_adjustment:
-                    extracted_from_chunk['renal_adjustment'] = result.renal_adjustment
-                
-                _store_chunk_context(store, medical_name, i, chunk, extracted_from_chunk)
-                
-                # Collect non-null results (only for missing fields)
-                if 'dose_duration' in missing_fields and result.dose_duration:
-                    all_results['dose_duration'].append(result.dose_duration)
-                if 'route_of_administration' in missing_fields and result.route_of_administration:
-                    all_results['route_of_administration'].append(result.route_of_administration)
-                if 'general_considerations' in missing_fields and result.general_considerations:
-                    all_results['general_considerations'].append(result.general_considerations)
-                if 'coverage_for' in missing_fields and result.coverage_for:
-                    all_results['coverage_for'].append(result.coverage_for)
-                if 'renal_adjustment' in missing_fields and result.renal_adjustment:
-                    all_results['renal_adjustment'].append(result.renal_adjustment)
+            while True:
+                attempt += 1
+                try:
+                    logger.debug(f"Processing chunk {i+1}/{len(chunks)} for {medical_name} (attempt {attempt})")
                     
-            except Exception as e:
-                logger.warning(f"[LangChain+Memory] Error processing chunk {i+1} for {medical_name}: {e}")
-                continue
+                    # Build cross-chunk context from previous chunks
+                    cross_chunk_context = ""
+                    if previous_chunks_context:
+                        cross_chunk_context = "\n\nPREVIOUS CHUNKS CONTEXT (for consistency):\n"
+                        for prev_idx, prev_fields in enumerate(previous_chunks_context[-3:], start=1):  # Last 3 chunks
+                            prev_summary = ", ".join([f"{k}={v[:50]}" for k, v in prev_fields.items() if v])
+                            if prev_summary:
+                                cross_chunk_context += f"Chunk {prev_idx}: {prev_summary}\n"
+                    
+                    # Format prompt with cross-chunk context
+                    prompt = DOSAGE_EXTRACTION_PROMPT_TEMPLATE.format(
+                        medical_name=medical_name,
+                        patient_age=patient_age_str,
+                        icd_codes=icd_code_names_str,
+                        resistance_gene=resistance_gene_str,
+                        missing_fields=missing_fields_str,
+                        existing_data=existing_data_context,
+                        cross_chunk_context=cross_chunk_context,
+                        chunk_num=i+1,
+                        total_chunks=len(chunks),
+                        chunk_content=chunk
+                    )
+                    
+                    # Use LlamaIndex for structured extraction
+                    program = LLMTextCompletionProgram.from_defaults(
+                        output_cls=DosageExtractionResult,
+                        llm=llm,
+                        prompt_template_str="{input_str}",
+                        verbose=False
+                    )
+                    
+                    result = program(input_str=prompt)
+                    
+                    if not result:
+                        logger.warning(f"Empty result from chunk {i+1} for {medical_name}, retrying...")
+                        time.sleep(retry_delay)
+                        continue
+                    
+                    # Store extracted fields from this chunk for cross-chunk context
+                    extracted_from_chunk = {}
+                    if 'dose_duration' in missing_fields and result.dose_duration:
+                        all_results['dose_duration'].append(result.dose_duration)
+                        extracted_from_chunk['dose_duration'] = result.dose_duration
+                    if 'route_of_administration' in missing_fields and result.route_of_administration:
+                        all_results['route_of_administration'].append(result.route_of_administration)
+                        extracted_from_chunk['route_of_administration'] = result.route_of_administration
+                    if 'general_considerations' in missing_fields and result.general_considerations:
+                        all_results['general_considerations'].append(result.general_considerations)
+                        extracted_from_chunk['general_considerations'] = result.general_considerations
+                    if 'coverage_for' in missing_fields and result.coverage_for:
+                        all_results['coverage_for'].append(result.coverage_for)
+                        extracted_from_chunk['coverage_for'] = result.coverage_for
+                    if 'renal_adjustment' in missing_fields and result.renal_adjustment:
+                        all_results['renal_adjustment'].append(result.renal_adjustment)
+                        extracted_from_chunk['renal_adjustment'] = result.renal_adjustment
+                    
+                    # Store context for next chunks
+                    if extracted_from_chunk:
+                        previous_chunks_context.append(extracted_from_chunk)
+                    
+                    break  # Success, move to next chunk
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing chunk {i+1} for {medical_name} (attempt {attempt}): {e}")
+                    time.sleep(retry_delay)
+                    continue
         
         # Merge results: blend with existing data
         extracted = {}
@@ -712,19 +670,18 @@ CRITICAL:
             # Not missing, preserve existing
             extracted['general_considerations'] = existing_data.get('general_considerations')
         
-        logger.info(f"[LangChain+Memory] Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v and k in missing_fields]}")
+        logger.info(f"Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v and k in missing_fields]}")
         return extracted
         
     except Exception as e:
-        logger.error(f"Error extracting fields with LangChain+Memory for {medical_name}: {e}")
+        logger.error(f"Error extracting fields for {medical_name}: {e}")
         return {}
 
 
 def _scrape_antibiotic_page(
     antibiotic: Dict[str, Any],
     category: str,
-    idx: int,
-    llm: Optional[BaseChatModel] = None
+    idx: int
 ) -> Tuple[str, int, Optional[str], List[str], bool, int]:
     """
     Scrape page content for a single antibiotic in a separate thread with its own browser.
@@ -733,7 +690,6 @@ def _scrape_antibiotic_page(
         antibiotic: Antibiotic dictionary
         category: Category name (first_choice, second_choice, alternative_antibiotic)
         idx: Index of the antibiotic in the list
-        llm: Optional LLM for validation
         
     Returns:
         Tuple of (category, idx, page_content, missing_fields, validation_failed, num_chunks) 
@@ -773,18 +729,17 @@ def _scrape_antibiotic_page(
         
         if drugs_com_url:
             # Validate that the page is about the same antibiotic before scraping
-            if llm:
-                is_valid = _validate_antibiotic_match(drugs_com_url, medical_name, driver, llm)
-                if not is_valid:
-                    logger.warning(f"[Thread] Page validation failed for {medical_name} - drug name doesn't match, will remove from result")
-                    return (category, idx, None, missing_fields, True, 0)  # validation_failed=True
+            is_valid = _validate_antibiotic_match(drugs_com_url, medical_name, driver)
+            if not is_valid:
+                logger.warning(f"[Thread] Page validation failed for {medical_name} - drug name doesn't match, will remove from result")
+                return (category, idx, None, missing_fields, True, 0)  # validation_failed=True
             
             logger.info(f"[Thread] Navigating directly to {drugs_com_url}")
             page_content = _scrape_drugs_com_page(drugs_com_url, driver)
             
             if page_content:
                 # Calculate number of chunks
-                chunks = _chunk_text(page_content, chunk_size=6000, overlap=500)
+                chunks = _chunk_text_with_llamaindex(page_content, chunk_size=6000, chunk_overlap=200)
                 num_chunks = len(chunks)
                 logger.info(f"[Thread] Successfully scraped page for {medical_name} ({num_chunks} chunks)")
                 return (category, idx, page_content, missing_fields, False, num_chunks)
@@ -830,12 +785,10 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.error("Please install selenium: pip install selenium")
             return {'result': result}
         
-        # Get or create memory store
-        store = _get_or_create_store(state)
-        
-        # Get LLM
-        from config import get_ollama_llm
-        llm = get_ollama_llm()
+        if not LLAMAINDEX_AVAILABLE:
+            logger.error("LlamaIndex is not available. Cannot perform enrichment.")
+            logger.error("Please install: pip install llama-index llama-index-llms-ollama")
+            return {'result': result}
         
         therapy_plan = result.get('antibiotic_therapy_plan', {})
         
@@ -914,7 +867,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Step 1: Scrape page content (with validation)
                 logger.info(f"  [1/2] Scraping {medical_name} from drugs.com...")
-                category_result, idx_result, page_content, scraped_missing_fields, validation_failed, num_chunks = _scrape_antibiotic_page(antibiotic, category, idx, llm)
+                category_result, idx_result, page_content, scraped_missing_fields, validation_failed, num_chunks = _scrape_antibiotic_page(antibiotic, category, idx)
                 
                 # If validation failed (name doesn't match), mark for removal
                 if validation_failed:
@@ -927,16 +880,14 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     antibiotics_to_remove[category].append(idx)
                     continue
                 
-                # Step 2: Extract fields using LangChain with memory
-                logger.info(f"  [2/2] Extracting fields for {medical_name} with memory context...")
-                extracted_fields = _extract_fields_with_langchain_memory(
+                # Step 2: Extract fields using LlamaIndex
+                logger.info(f"  [2/2] Extracting fields for {medical_name}...")
+                extracted_fields = _extract_fields_with_llamaindex(
                     page_content=page_content,
                     medical_name=medical_name,
                     missing_fields=missing_fields,
                     existing_data=antibiotic,  # Pass existing data to blend with
                     age=age,
-                    llm=llm,
-                    store=store,
                     icd_code_names=icd_code_names,
                     resistance_gene=resistance_gene
                 )
@@ -1001,7 +952,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 
                 with ThreadPoolExecutor(max_workers=3) as executor:
                     future_to_antibiotic = {
-                        executor.submit(_scrape_antibiotic_page, ab, cat, idx, llm): (ab, cat, idx, mf)
+                        executor.submit(_scrape_antibiotic_page, ab, cat, idx): (ab, cat, idx, mf)
                         for ab, cat, idx, mf in alternative_ab
                     }
                     
@@ -1049,15 +1000,13 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         try:
                             logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks)...")
                             
-                            # Extract fields using LangChain with memory
-                            extracted_fields = _extract_fields_with_langchain_memory(
+                            # Extract fields using LlamaIndex
+                            extracted_fields = _extract_fields_with_llamaindex(
                                 page_content=page_content,
                                 medical_name=medical_name,
                                 missing_fields=missing_fields,
                                 existing_data=antibiotic,
                                 age=age,
-                                llm=llm,
-                                store=store,
                                 icd_code_names=icd_code_names,
                                 resistance_gene=resistance_gene
                             )
@@ -1141,8 +1090,33 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info(f"Found {len(complete_alternatives)} complete alternative_antibiotic entries (< 5), keeping {len(incomplete_alternatives)} incomplete ones")
         
         logger.info("Enrichment complete")
+        
+        # Save results
+        input_params = state.get('input_parameters', {})
+        _save_enrichment_results(input_params, result)
+        
         return {'result': result}
         
     except Exception as e:
         logger.error(f"Error in enrichment_node: {e}", exc_info=True)
         raise
+
+
+def _save_enrichment_results(input_params: Dict, result: Dict) -> None:
+    """Save enrichment results to file."""
+    try:
+        from config import get_output_config
+        output_config = get_output_config()
+        output_dir = Path(output_config.get('directory', 'output'))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_file = output_dir / "enrichment_result.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'input_parameters': input_params,
+                'result': result
+            }, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Enrichment results saved to: {output_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save enrichment results: {e}")

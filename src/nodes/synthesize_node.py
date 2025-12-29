@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
 from schemas import UnifiedResistanceGenesResult, UnifiedAntibioticEntryForSynthesis
-from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE
+from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE
 from utils import format_resistance_genes, get_icd_names_from_state
 from config import get_ollama_config
 
@@ -153,8 +153,8 @@ def _unify_antibiotic_group_with_llm(
                 logger.warning(f"Empty result for {antibiotic_name} (attempt {attempt}), retrying...")
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-            continue
-        
+                continue
+            
             result_dict = result.model_dump()
             
             unified = {
@@ -246,7 +246,7 @@ def _unify_resistance_genes_with_llm(
     retry_delay: float = 2.0
 ) -> List[Dict[str, Any]]:
     """
-    Unify resistance genes using LLM.
+    Unify resistance genes using LLM - processes all genes in one go.
     
     Args:
         resistance_genes_data: List of resistance gene entries from different sources
@@ -258,50 +258,38 @@ def _unify_resistance_genes_with_llm(
     if not resistance_genes_data:
         return []
     
-    # Group by normalized gene name
+    # Group by gene name (keep original names, don't normalize)
     gene_groups = defaultdict(list)
     for entry in resistance_genes_data:
         gene_name = entry.get('detected_resistant_gene_name', '').strip()
         if gene_name:
-            normalized = _normalize_antibiotic_name(gene_name)
-            gene_groups[normalized].append(entry)
+            gene_groups[gene_name].append(entry)
     
-    # Build prompt
+    # Build prompt with all genes grouped
     genes_text = []
-    for normalized_name, entries in gene_groups.items():
+    for gene_name, entries in gene_groups.items():
         entries_list = []
         for i, entry in enumerate(entries, 1):
             entries_list.append(
-                f"  Source {i}:\n"
-                f"    gene_name: {entry.get('detected_resistant_gene_name', 'null')}\n"
-                f"    medication_class: {entry.get('potential_medication_class_affected', 'null')}\n"
-                f"    considerations: {entry.get('general_considerations', 'null')}"
+                f"Source {i}:\n"
+                f"  detected_resistant_gene_name: {entry.get('detected_resistant_gene_name', 'null')}\n"
+                f"  potential_medication_class_affected: {entry.get('potential_medication_class_affected') or 'null'}\n"
+                f"  general_considerations: {entry.get('general_considerations') or 'null'}"
             )
-        genes_text.append(f"{normalized_name}:\n" + "\n".join(entries_list))
+        genes_text.append(f"{gene_name}:\n" + "\n\n".join(entries_list))
     
     genes_list = "\n\n".join(genes_text)
     
-    prompt = f"""Unify resistance gene information from multiple sources.
-
-RESISTANCE GENES:
-{genes_list}
-
-TASK:
-Synthesize information for each unique resistance gene.
-
-RULES:
-1. Group same genes from different sources
-2. Combine medication classes affected
-3. Combine all general considerations (resistance mechanisms, clinical implications)
-4. Use most standard gene name
-
-Return unified resistance genes."""
+    # Use prompt template from prompts.py
+    prompt = RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE.format(
+        genes_list=genes_list
+    )
 
     llm = _create_llm()
     if not llm:
         logger.warning("LlamaIndex LLM not available, using first entry from each group")
         unified_genes = []
-        for normalized_name, entries in gene_groups.items():
+        for gene_name, entries in gene_groups.items():
             if entries:
                 unified_genes.append(entries[0].copy())
         return unified_genes
@@ -332,12 +320,10 @@ Return unified resistance genes."""
             if resistance_genes:
                 return [_clean_null_strings(entry) for entry in resistance_genes]
             else:
-                logger.warning("LLM returned no resistance genes, using first entry from each group")
-                unified_genes = []
-                for normalized_name, entries in gene_groups.items():
-                    if entries:
-                        unified_genes.append(entries[0].copy())
-                return unified_genes
+                logger.warning(f"LLM returned no resistance genes (attempt {attempt}), retrying...")
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                continue
                 
         except Exception as e:
             logger.warning(f"Error unifying resistance genes (attempt {attempt}): {e}")

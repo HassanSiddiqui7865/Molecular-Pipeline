@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # Search prompt template for pathogen information extraction
-SEARCH_PROMPT_TEMPLATE = """Evidence-based first-line and second-line antibiotic therapy for {pathogen_name} with {resistant_gene} resistance, covering drug selection, dosage, treatment duration, and stewardship considerations{severity_codes_text}"""
+SEARCH_PROMPT_TEMPLATE = """Evidence-based antibiotic dosing regimens for {pathogen_name} with {resistant_gene} resistance, specifying drug names, adult dosing (mg/kg or mg), dosing frequency, route of administration, and treatment duration, with brief antimicrobial stewardship considerations{severity_codes_text}"""
 
 class PerplexitySearch:
     """Wrapper for Perplexity Search API using the official SDK."""
@@ -194,7 +194,7 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             if formatted_codes:
                 icd_formatted = ', '.join(formatted_codes)
-                severity_codes_text = f" for patient with ICD-10 codes: {icd_formatted}"
+                severity_codes_text = f" for patient with ICD-10 codes {icd_formatted}"
         
         # Fallback: if no names extracted, try using severity_codes_transformed
         if not severity_codes_text:
@@ -209,7 +209,7 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 # Or extract from parentheses as fallback
                 if '(' in severity_codes_transformed:
                     # Already has format with parentheses
-                    severity_codes_text = f" for patient with ICD-10 codes: {severity_codes_transformed}"
+                    severity_codes_text = f" for patient with ICD-10 codes {severity_codes_transformed}"
                 else:
                     # Just codes, try to get names from code_names_list
                     from utils import get_severity_codes_from_input
@@ -226,7 +226,7 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 formatted_codes.append(code)
                         if formatted_codes:
                             icd_formatted = ', '.join(formatted_codes)
-                            severity_codes_text = f" for patient with ICD-10 codes: {icd_formatted}"
+                            severity_codes_text = f" for patient with ICD-10 codes {icd_formatted}"
         
         # Format search query
         search_query = format_search_query(
