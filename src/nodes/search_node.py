@@ -3,6 +3,7 @@ Search node for LangGraph - Performs Perplexity search.
 """
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, Any, List
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # Search prompt template for pathogen information extraction
-SEARCH_PROMPT_TEMPLATE = """Evidence-based first-line and second-line antibiotic therapy for {pathogen_name} with {resistant_gene} resistance, covering drug selection, dosage, treatment duration, and stewardship considerations{severity_codes_text}"""
+SEARCH_PROMPT_TEMPLATE = """Evidence-based first-line, second-line, and alternative antibiotic therapy for {pathogen_name} with {resistant_gene} resistance, covering drug selection, dosage, treatment duration, and stewardship considerations{severity_codes_text}"""
 
 
 class PerplexitySearch:
@@ -176,18 +177,34 @@ def search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Get transformed ICD codes if available, otherwise use original
         icd_transformation = state.get('icd_transformation', {})
-        severity_codes_transformed = icd_transformation.get('severity_codes_transformed', '')
+        code_names_list = icd_transformation.get('code_names', [])
         
-        # If transformation failed or not available, use original codes
-        if not severity_codes_transformed:
-            from utils import get_severity_codes_from_input, format_icd_codes
-            severity_codes_list = get_severity_codes_from_input(input_params)
-            severity_codes_transformed = format_icd_codes(severity_codes_list)
-        
-        # Add ICD codes to search query if available
+        # Extract just the ICD code names (not the codes themselves)
         severity_codes_text = ''
-        if severity_codes_transformed:
-            severity_codes_text = f" for patient with ICD-10 codes: {severity_codes_transformed}"
+        if code_names_list:
+            # Extract names from code_names list (skip if name equals code)
+            names = [
+                item['name'] for item in code_names_list 
+                if isinstance(item, dict) and item.get('name') and item.get('name') != item.get('code')
+            ]
+            if names:
+                icd_names = ', '.join(names)
+                severity_codes_text = f" for patient with {icd_names}"
+        
+        # Fallback: if no names extracted, try using severity_codes_transformed
+        if not severity_codes_text:
+            severity_codes_transformed = icd_transformation.get('severity_codes_transformed', '')
+            if not severity_codes_transformed:
+                from utils import get_severity_codes_from_input, format_icd_codes
+                severity_codes_list = get_severity_codes_from_input(input_params)
+                severity_codes_transformed = format_icd_codes(severity_codes_list)
+            
+            if severity_codes_transformed:
+                # Extract text in parentheses (the names) as fallback
+                names = re.findall(r'\(([^)]+)\)', severity_codes_transformed)
+                if names:
+                    icd_names = ', '.join(names)
+                    severity_codes_text = f" for patient with {icd_names}"
         
         # Format search query
         search_query = format_search_query(

@@ -5,6 +5,7 @@ Tests the extraction node by loading search results from perplexity cache files.
 import json
 import sys
 import logging
+import hashlib
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -13,6 +14,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from nodes.extract_node import extract_node
+from nodes.icd_transform_node import icd_transform_node
+from nodes.search_node import search_node, PerplexitySearch
+from config import get_perplexity_config
+from utils import get_pathogens_from_input, get_resistance_genes_from_input, get_severity_codes_from_input
 
 # Configure logging
 logging.basicConfig(
@@ -174,8 +179,63 @@ def main():
             logger.info(f"Using cache: {latest_cache.name}")
             search_results = load_search_results(str(latest_cache))
         else:
-            logger.error("No cache files found. Provide cache file as argument.")
-            sys.exit(1)
+            # No cache found - perform ICD transformation and search
+            logger.info("No cache files found. Performing ICD transformation and search...")
+            
+            # Initialize state
+            state = {
+                'input_parameters': input_parameters
+            }
+            
+            # Step 1: Transform ICD codes to names
+            logger.info("Transforming ICD codes to names...")
+            icd_result = icd_transform_node(state)
+            state.update(icd_result)
+            
+            # Step 2: Perform search
+            logger.info("Performing Perplexity search...")
+            
+            # Get Perplexity configuration
+            perplexity_config = get_perplexity_config()
+            if not perplexity_config.get('api_key') or perplexity_config.get('api_key') == 'YOUR_PERPLEXITY_API_KEY':
+                logger.error("Please set your PERPLEXITY_API_KEY in .env file")
+                sys.exit(1)
+            
+            # Create Perplexity client
+            perplexity_client = PerplexitySearch(
+                api_key=perplexity_config['api_key'],
+                max_tokens=perplexity_config.get('max_tokens', 50000),
+                max_tokens_per_page=perplexity_config.get('max_tokens_per_page', 4096)
+            )
+            
+            # Generate cache path
+            pathogens = get_pathogens_from_input(input_parameters)
+            resistant_genes = get_resistance_genes_from_input(input_parameters)
+            severity_codes = get_severity_codes_from_input(input_parameters)
+            
+            pathogens_str = json.dumps(pathogens, sort_keys=True) if pathogens else ''
+            genes_str = json.dumps(resistant_genes, sort_keys=True) if resistant_genes else ''
+            codes_str = json.dumps(severity_codes, sort_keys=True) if severity_codes else ''
+            
+            cache_key = f"{pathogens_str}_{genes_str}_{codes_str}"
+            cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
+            cache_path = output_dir / f"perplexity_cache_{cache_hash}.json"
+            
+            # Add Perplexity client and metadata to state
+            state['metadata'] = {
+                'perplexity_client': perplexity_client,
+                'max_search_results': perplexity_config.get('max_search_results', 10),
+                'cache_path': str(cache_path)
+            }
+            
+            # Perform search
+            search_result = search_node(state)
+            state.update(search_result)
+            
+            # Extract search results (already in dict format from search_node)
+            search_results = search_result.get('search_results', [])
+            
+            logger.info(f"Search completed. Found {len(search_results)} results.")
     
     # Second argument: output file path (optional)
     output_file = sys.argv[2] if len(sys.argv) > 2 else None

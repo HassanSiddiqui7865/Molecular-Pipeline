@@ -8,13 +8,12 @@ from pydantic import BaseModel, Field
 class AntibioticEntry(BaseModel):
     """Schema for a single antibiotic entry."""
     medical_name: str
-    coverage_for: str
+    coverage_for: Optional[str] = None
     route_of_administration: Optional[str] = None
     dose_duration: Optional[str] = None
     renal_adjustment: Optional[str] = None
     general_considerations: Optional[str] = None
     is_combined: bool = False
-    categorization_citation: Optional[str] = None
 
 
 class AntibioticTherapyPlan(BaseModel):
@@ -28,7 +27,7 @@ class AntibioticTherapyPlan(BaseModel):
 class ResistanceGeneEntry(BaseModel):
     """Schema for a single resistance gene analysis entry."""
     detected_resistant_gene_name: str
-    potential_medication_class_affected: str
+    potential_medication_class_affected: Optional[str] = None
     general_considerations: Optional[str] = None
 
 
@@ -61,33 +60,11 @@ class InputParameters(BaseModel):
     systemic: Optional[bool] = None
 
 
-# Note: PipelineState is defined in graph.py as TypedDict for LangGraph compatibility
-
-
-class UnifiedAntibioticEntry(BaseModel):
-    """Schema for unified antibiotic entry."""
-    medical_name: str
-    coverage_for: Optional[str] = None
-    route_of_administration: Optional[str] = None
-    dose_duration: Optional[str] = None
-    renal_adjustment: Optional[str] = None
-    general_considerations: Optional[str] = None
-    final_category: str
-    mentioned_in_sources: List[int]
-
-
 class UnifiedResistanceGene(BaseModel):
     """Schema for unified resistance gene entry."""
     detected_resistant_gene_name: str
-    potential_medication_class_affected: str
+    potential_medication_class_affected: Optional[str] = None
     general_considerations: Optional[str] = None
-
-
-class UnifiedAntibioticsResult(BaseModel):
-    """Schema for unified antibiotics result from LLM."""
-    first_choice: List[UnifiedAntibioticEntry] = Field(default_factory=list)
-    second_choice: List[UnifiedAntibioticEntry] = Field(default_factory=list)
-    alternative_antibiotic: List[UnifiedAntibioticEntry] = Field(default_factory=list)
 
 
 class UnifiedResistanceGenesResult(BaseModel):
@@ -102,15 +79,25 @@ class OutputData(BaseModel):
     result: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
-class RankedAntibioticEntry(BaseModel):
-    """Schema for a ranked antibiotic entry."""
+class FilteredAntibioticEntry(BaseModel):
+    """Schema for a filtered antibiotic entry."""
     medical_name: str
-    ranked_category: str
-    is_relevant: bool
-    ranking_reason: str
+    should_keep: bool
+    filtering_reason: Optional[str] = None
 
 
-class RankedAntibioticsResult(BaseModel):
-    """Schema for ranked antibiotics result."""
-    ranked_antibiotics: List[RankedAntibioticEntry] = Field(default_factory=list)
+class FilteredAntibioticsResult(BaseModel):
+    """Schema for filtered antibiotics result."""
+    filtered_antibiotics: List[FilteredAntibioticEntry]
 
+
+class UnifiedAntibioticEntryForSynthesis(BaseModel):
+    """Schema for unified antibiotic entry in synthesis node."""
+    medical_name: str
+    coverage_for: Optional[str] = None
+    route_of_administration: Optional[str] = None
+    dose_duration: Optional[str] = None
+    renal_adjustment: Optional[str] = None
+    general_considerations: Optional[str] = None
+    is_combined: bool = False
+    is_complete: bool = False

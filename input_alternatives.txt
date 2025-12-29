@@ -1,0 +1,47 @@
+================================================================================
+TEST CASE 2: Single pathogen - MRSA bacteremia
+Copy this JSON to replace content in input.json:
+================================================================================
+
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Staphylococcus aureus",
+      "pathogen_count": "10^5 CFU/ML"
+    }
+  ],
+  "resistant_genes": [
+    "mecA"
+  ],
+  "severity_codes": [
+    "A41.2"
+  ],
+  "age": 45,
+  "sample": "Blood",
+  "systemic": true
+}
+
+================================================================================
+TEST CASE 3: Gram-negative - ESBL E. coli UTI
+Copy this JSON to replace content in input.json:
+================================================================================
+
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Escherichia coli",
+      "pathogen_count": "10^5 CFU/ML"
+    }
+  ],
+  "resistant_genes": [
+    "CTX-M-15",
+    "SHV-12"
+  ],
+  "severity_codes": [
+    "N39.0"
+  ],
+  "age": 28,
+  "sample": "Urine",
+  "systemic": false
+}
+

@@ -4,6 +4,7 @@ Uses LlamaIndex Pydantic program for structured extraction.
 """
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -41,7 +42,7 @@ def _create_llm() -> Optional[Ollama]:
             model=config['model'].replace('ollama/', ''),
             base_url=config['api_base'],
             temperature=config['temperature'],
-            request_timeout=300.0
+            request_timeout=600.0
         )
     except Exception as e:
         logger.error(f"Failed to create Ollama LLM: {e}")
@@ -58,9 +59,15 @@ def _extract_with_llamaindex(
     systemic: bool,
     pathogens: Optional[List[Dict[str, str]]] = None,
     resistant_genes_list: Optional[List[str]] = None,
-    source_title: str = ""
+    source_title: str = "",
+    retry_delay: float = 2.0
 ) -> Dict[str, Any]:
-    """Extract using LlamaIndex Pydantic program."""
+    """
+    Extract using LlamaIndex Pydantic program with unlimited retry logic.
+    
+    Args:
+        retry_delay: Initial delay between retries in seconds (default: 2.0)
+    """
     llm = _create_llm()
     if not llm:
         logger.error("LlamaIndex LLM not available")
@@ -77,37 +84,45 @@ def _extract_with_llamaindex(
         content=content
     )
     
-    try:
-        program = LLMTextCompletionProgram.from_defaults(
-            output_cls=CombinedExtractionResult,
-            llm=llm,
-            prompt_template_str="{input_str}",
-            verbose=False
-        )
-        
-        result = program(input_str=prompt)
-        
-        if not result:
-            logger.warning(f"Empty result from {source_title}")
-            return _empty_result()
-        
-        result_dict = result.model_dump()
-        
-        # Log summary
-        therapy = result_dict.get('antibiotic_therapy_plan', {})
-        logger.info(
-            f"Extracted from '{source_title[:50]}...': "
-            f"first={len(therapy.get('first_choice', []))}, "
-            f"second={len(therapy.get('second_choice', []))}, "
-            f"alt={len(therapy.get('alternative_antibiotic', []))}, "
-            f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
-        )
-        
-        return result_dict
-        
-    except Exception as e:
-        logger.error(f"Extraction error from {source_title}: {e}", exc_info=True)
-        return _empty_result()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            program = LLMTextCompletionProgram.from_defaults(
+                output_cls=CombinedExtractionResult,
+                llm=llm,
+                prompt_template_str="{input_str}",
+                verbose=False
+            )
+            
+            result = program(input_str=prompt)
+            
+            if not result:
+                logger.warning(f"Empty result from {source_title} (attempt {attempt}), retrying...")
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                continue
+            
+            result_dict = result.model_dump()
+            
+            # Log summary
+            therapy = result_dict.get('antibiotic_therapy_plan', {})
+            logger.info(
+                f"Extracted from '{source_title[:50]}...': "
+                f"first={len(therapy.get('first_choice', []))}, "
+                f"second={len(therapy.get('second_choice', []))}, "
+                f"alt={len(therapy.get('alternative_antibiotic', []))}, "
+                f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
+            )
+            
+            return result_dict
+            
+        except Exception as e:
+            logger.warning(
+                f"Extraction error from {source_title} (attempt {attempt}): {e}"
+            )
+            logger.info(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
 
 
 def _empty_result() -> Dict[str, Any]:
@@ -162,7 +177,7 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 f"[ID: {uuid.uuid4()}]"
             )
             
-            # Extract
+            # Extract with retry logic
             extraction = _extract_with_llamaindex(
                 content=source_content,
                 pathogen_name=pathogen_display,
