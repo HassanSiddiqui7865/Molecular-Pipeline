@@ -25,3 +25,7 @@ perplexityai>=0.22.0
 # Required only if using database feature in icd_transform_node
 paramiko>=3.0.0
 psycopg2-binary>=2.9.0
+
+# Web framework for frontend API
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0

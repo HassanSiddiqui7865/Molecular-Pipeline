@@ -230,6 +230,11 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
             }
         
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        total_sources = len(search_results)
+        
         # Process concurrently
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_idx = {
@@ -238,12 +243,27 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
             }
             
             results_dict = {}
+            completed_count = 0
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
                     results_dict[idx] = future.result()
+                    completed_count += 1
+                    
+                    # Emit progress for each completed source
+                    if progress_callback:
+                        sub_progress = (completed_count / total_sources) * 100.0
+                        progress_callback('extract', sub_progress, f'Extracted {completed_count}/{total_sources} sources')
+                    
                 except Exception as e:
                     logger.error(f"[{idx}] Processing error: {e}", exc_info=True)
+                    completed_count += 1
+                    
+                    # Emit progress even on error
+                    if progress_callback:
+                        sub_progress = (completed_count / total_sources) * 100.0
+                        progress_callback('extract', sub_progress, f'Processed {completed_count}/{total_sources} sources (error on {idx})')
+                    
                     # Store empty result on error
                     results_dict[idx] = {
                         'source_url': search_results[idx-1].get('url', ''),

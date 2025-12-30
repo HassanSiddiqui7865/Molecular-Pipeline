@@ -5,6 +5,7 @@ Uses LlamaIndex for structured extraction.
 import logging
 import json
 import time
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
@@ -72,9 +73,9 @@ def _unify_antibiotic_group_with_llm(
         return entry
     
     # Build prompt with all entries
-        entries_text = []
+    entries_text = []
     for i, entry in enumerate(entries, 1):
-            source_idx = entry.get('source_index', i)
+        source_idx = entry.get('source_index', i)
         original_category = entry.get('original_category', 'unknown')
         
         entries_text.append(
@@ -122,10 +123,11 @@ def _unify_antibiotic_group_with_llm(
                 logger.warning(f"Empty result for {antibiotic_name} (attempt {attempt}), retrying...")
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-            continue
-        
+                continue
+            
             result_dict = result.model_dump()
             
+            # Trust LLM's output completely - it will set dose_duration to null if incomplete per prompt
             unified = {
                 'medical_name': result_dict.get('medical_name', antibiotic_name),
                 'coverage_for': result_dict.get('coverage_for') if result_dict.get('coverage_for') else None,
@@ -134,7 +136,7 @@ def _unify_antibiotic_group_with_llm(
                 'renal_adjustment': result_dict.get('renal_adjustment') if result_dict.get('renal_adjustment') else None,
                 'general_considerations': result_dict.get('general_considerations') if result_dict.get('general_considerations') else None,
                 'is_combined': result_dict.get('is_combined', False),
-                'is_complete': result_dict.get('is_complete', False) 
+                'is_complete': result_dict.get('is_complete', False)  # LLM determines this based on prompt
             }
             
             # Ensure is_complete is always present
@@ -363,8 +365,14 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
         logger.info(f"Grouped {len(antibiotic_groups)} unique antibiotics from {total_sources} sources")
         
+        # Get progress callback from metadata
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
         # Step 2: Unify antibiotics - use LLM if count > 1, otherwise use as-is
         unified_antibiotics = []
+        total_antibiotics = len(antibiotic_groups)
+        unified_count = 0
         
         for normalized_name, entries in antibiotic_groups.items():
             # Get source indices for this antibiotic
@@ -395,6 +403,12 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Add to appropriate category
             unified_entry['final_category'] = final_category
             unified_antibiotics.append(unified_entry)
+            
+            # Emit progress for this antibiotic
+            if progress_callback and total_antibiotics > 0:
+                unified_count += 1
+                sub_progress = (unified_count / total_antibiotics) * 100.0
+                progress_callback('synthesize', sub_progress, f'Unified {unified_count}/{total_antibiotics} antibiotics')
         
         # Step 3: Organize into categories
         result_categories = {
@@ -461,6 +475,10 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             f"{len(result_categories['alternative_antibiotic'])} alternative"
         )
         
+        # Save results to file
+        input_params = state.get('input_parameters', {})
+        _save_synthesize_results(input_params, result)
+        
         return {
             'result': result
         }
@@ -468,3 +486,23 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error in synthesize_node: {e}", exc_info=True)
         raise
+
+
+def _save_synthesize_results(input_params: Dict, result: Dict) -> None:
+    """Save synthesize results to file."""
+    try:
+        from config import get_output_config
+        output_config = get_output_config()
+        output_dir = Path(output_config.get('directory', 'output'))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_file = output_dir / "synthesize_result.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'input_parameters': input_params,
+                'result': result
+            }, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Synthesize results saved to: {output_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save synthesize results: {e}")

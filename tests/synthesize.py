@@ -61,24 +61,12 @@ def load_extract_output(file_path: str) -> Dict[str, Any]:
         raise
 
 
-def save_synthesize_output(data: Dict[str, Any], output_path: str):
-    """Save synthesize_node output to JSON file."""
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    
-    logger.info(f"Synthesize output saved to: {output_path}")
-
-
-def test_synthesize_node(extract_output_file: str, output_file: str = None):
+def test_synthesize_node(extract_output_file: str):
     """
     Test synthesize_node with saved rank_node output.
     
     Args:
         extract_output_file: Path to JSON file containing rank_node output
-        output_file: Optional path to save synthesize_node output (default: synthesize_result.json)
     """
     # Load rank_node output
     extract_data = load_extract_output(extract_output_file)
@@ -112,17 +100,6 @@ def test_synthesize_node(extract_output_file: str, output_file: str = None):
         else:
             logger.warning("No result returned from synthesize_node")
         
-        # Save output (only the synthesized result, not source_results)
-        if not output_file:
-            output_dir = project_root / "output"
-            output_file = output_dir / "synthesize_result.json"
-        
-        output_data = {
-            'input_parameters': state['input_parameters'],
-            'result': unified_result
-        }
-        save_synthesize_output(output_data, str(output_file))
-        
         logger.info("Test completed")
         
         return result
@@ -147,13 +124,10 @@ def main():
             logger.info(f"Using rank_result.json: {extract_output_file}")
         else:
             logger.error("rank_result.json not found. Please run rank_node first or provide a path to rank_result.json")
-            logger.error("Usage: python tests/synthesize.py [path_to_rank_result.json] [output_file.json]")
+            logger.error("Usage: python tests/synthesize.py [path_to_rank_result.json]")
             sys.exit(1)
     
-    # Optional output file
-    output_file = sys.argv[2] if len(sys.argv) > 2 else None
-    
-    test_synthesize_node(str(extract_output_file), output_file)
+    test_synthesize_node(str(extract_output_file))
 
 
 if __name__ == "__main__":

@@ -247,11 +247,113 @@ def _get_ssh_tunnel(db_config: Dict[str, Any]):
                 logger.warning(f"Error closing SSH connection: {e}")
 
 
+def _query_icd_code_from_db(code: str, cursor) -> Optional[str]:
+    """
+    Query a single ICD code from database using an existing cursor.
+    
+    Args:
+        code: Normalized ICD code
+        cursor: Database cursor (RealDictCursor)
+        
+    Returns:
+        ICD code name/description, or None if not found or error
+    """
+    try:
+        # Step 1: Query disease_identifiers to find disease_id
+        # First try exact match, then try pattern match if needed
+        code_lower = code.lower()
+        
+        # Try exact match first
+        query1 = """
+            SELECT disease_id 
+            FROM dev.disease_identifiers 
+            WHERE identifier_type = 'ICD10' 
+            AND LOWER(identifier_value) = %s 
+            LIMIT 1
+        """
+        cursor.execute(query1, (code_lower,))
+        result1 = cursor.fetchone()
+        
+        # If not found, try pattern match
+        if not result1:
+            query1_pattern = """
+                SELECT disease_id 
+                FROM dev.disease_identifiers 
+                WHERE identifier_type = 'ICD10' 
+                AND LOWER(identifier_value) LIKE %s 
+                LIMIT 1
+            """
+            pattern = f"{code_lower}%"
+            cursor.execute(query1_pattern, (pattern,))
+            result1 = cursor.fetchone()
+        
+        if not result1:
+            logger.debug(f"ICD code {code} not found in disease_identifiers table")
+            return None
+        
+        # Extract disease_id
+        if isinstance(result1, dict):
+            disease_id = result1.get('disease_id')
+        else:
+            disease_id = result1[0] if result1 else None
+        
+        if not disease_id:
+            logger.debug(f"No disease_id found for ICD code {code}")
+            return None
+        
+        # Step 2: Query dev.diseases table to get disease name
+        query2 = 'SELECT * FROM dev.diseases WHERE id = %s LIMIT 1'
+        
+        cursor.execute(query2, (disease_id,))
+        result2 = cursor.fetchone()
+        
+        if not result2:
+            logger.debug(f"Disease with id {disease_id} not found in diseases table")
+            return None
+        
+        # Extract name from result
+        # Try common column names: 'name', 'disease_name', 'title'
+        if isinstance(result2, dict):
+            name = result2.get('name') or result2.get('disease_name') or result2.get('title')
+        else:
+            # For tuple results, try to find name column by index
+            # This is less reliable, so we'll try to get column names
+            if hasattr(cursor, 'description') and cursor.description:
+                column_names = [desc[0] for desc in cursor.description]
+                try:
+                    name_idx = column_names.index('name')
+                    name = result2[name_idx] if len(result2) > name_idx else None
+                except ValueError:
+                    # Try other common names
+                    for col_name in ['disease_name', 'title']:
+                        try:
+                            name_idx = column_names.index(col_name)
+                            name = result2[name_idx] if len(result2) > name_idx else None
+                            if name:
+                                break
+                        except ValueError:
+                            continue
+                    else:
+                        name = None
+            else:
+                name = None
+        
+        if name:
+            logger.info(f"Found ICD code {code} in database: {name}")
+            return name
+        else:
+            logger.debug(f"Disease found but no name column available for disease_id {disease_id}")
+            return None
+    except Exception as e:
+        logger.warning(f"Error querying database for ICD code {code}: {e}")
+        return None
+
+
 def _get_icd_code_from_database(code: str, db_config: Dict[str, Any]) -> Optional[str]:
     """
-    Get ICD code name from database via SSH tunnel using two-step query:
-    1. Query dev.disease_identifiers to find disease_id by ICD10 code
-    2. Query diseases table to get disease name by disease_id
+    Get ICD code name from database via SSH tunnel using two-step query.
+    This is a wrapper that opens a connection for a single code lookup.
+    For multiple codes, use _get_icd_codes_from_database_batch instead.
     
     Args:
         code: Normalized ICD code
@@ -284,91 +386,7 @@ def _get_icd_code_from_database(code: str, db_config: Dict[str, Any]) -> Optiona
                 cursor = connection.cursor(cursor_factory=RealDictCursor)
                 
                 try:
-                    # Step 1: Query disease_identifiers to find disease_id
-                    # First try exact match, then try pattern match if needed
-                    code_lower = code.lower()
-                    
-                    # Try exact match first
-                    query1 = """
-                        SELECT disease_id 
-                        FROM dev.disease_identifiers 
-                        WHERE identifier_type = 'ICD10' 
-                        AND LOWER(identifier_value) = %s 
-                        LIMIT 1
-                    """
-                    cursor.execute(query1, (code_lower,))
-                    result1 = cursor.fetchone()
-                    
-                    # If not found, try pattern match
-                    if not result1:
-                        query1_pattern = """
-                            SELECT disease_id 
-                            FROM dev.disease_identifiers 
-                            WHERE identifier_type = 'ICD10' 
-                            AND LOWER(identifier_value) LIKE %s 
-                            LIMIT 1
-                        """
-                        pattern = f"{code_lower}%"
-                        cursor.execute(query1_pattern, (pattern,))
-                        result1 = cursor.fetchone()
-                    
-                    if not result1:
-                        logger.debug(f"ICD code {code} not found in disease_identifiers table")
-                        return None
-                    
-                    # Extract disease_id
-                    if isinstance(result1, dict):
-                        disease_id = result1.get('disease_id')
-                    else:
-                        disease_id = result1[0] if result1 else None
-                    
-                    if not disease_id:
-                        logger.debug(f"No disease_id found for ICD code {code}")
-                        return None
-                    
-                    # Step 2: Query dev.diseases table to get disease name
-                    query2 = 'SELECT * FROM dev.diseases WHERE id = %s LIMIT 1'
-                    
-                    cursor.execute(query2, (disease_id,))
-                    result2 = cursor.fetchone()
-                    
-                    if not result2:
-                        logger.debug(f"Disease with id {disease_id} not found in diseases table")
-                        return None
-                    
-                    # Extract name from result
-                    # Try common column names: 'name', 'disease_name', 'title'
-                    if isinstance(result2, dict):
-                        name = result2.get('name') or result2.get('disease_name') or result2.get('title')
-                    else:
-                        # For tuple results, try to find name column by index
-                        # This is less reliable, so we'll try to get column names
-                        if hasattr(cursor, 'description') and cursor.description:
-                            column_names = [desc[0] for desc in cursor.description]
-                            try:
-                                name_idx = column_names.index('name')
-                                name = result2[name_idx] if len(result2) > name_idx else None
-                            except ValueError:
-                                # Try other common names
-                                for col_name in ['disease_name', 'title']:
-                                    try:
-                                        name_idx = column_names.index(col_name)
-                                        name = result2[name_idx] if len(result2) > name_idx else None
-                                        if name:
-                                            break
-                                    except ValueError:
-                                        continue
-                                else:
-                                    name = None
-                        else:
-                            name = None
-                    
-                    if name:
-                        logger.info(f"Found ICD code {code} in database: {name}")
-                        return name
-                    else:
-                        logger.debug(f"Disease found but no name column available for disease_id {disease_id}")
-                        return None
+                    return _query_icd_code_from_db(code, cursor)
                 finally:
                     cursor.close()
                         
@@ -378,6 +396,60 @@ def _get_icd_code_from_database(code: str, db_config: Dict[str, Any]) -> Optiona
     except Exception as e:
         logger.warning(f"Error querying database for ICD code {code}: {e}")
         return None
+
+
+@contextmanager
+def _get_db_connection_with_tunnel(db_config: Dict[str, Any]):
+    """
+    Context manager that opens SSH tunnel and database connection.
+    Yields (connection, cursor) tuple.
+    
+    Args:
+        db_config: Database configuration dictionary
+        
+    Yields:
+        (connection, cursor) tuple
+    """
+    if not PARAMIKO_AVAILABLE:
+        raise ImportError("paramiko not available")
+    
+    if not POSTGRESQL_AVAILABLE:
+        raise ImportError("psycopg2 not available")
+    
+    connection = None
+    cursor = None
+    
+    # Use nested context manager for SSH tunnel
+    with _get_ssh_tunnel(db_config) as local_port:
+        try:
+            # Connect to PostgreSQL database through SSH tunnel
+            connection = psycopg2.connect(
+                host='127.0.0.1',
+                port=local_port,
+                user=db_config['db_username'],
+                password=db_config['db_password'],
+                database=db_config['db_name']
+            )
+            
+            # Create cursor with RealDictCursor for dictionary-like results
+            cursor = connection.cursor(cursor_factory=RealDictCursor)
+            
+            yield (connection, cursor)
+            
+        finally:
+            # Clean up cursor
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            
+            # Clean up connection
+            if connection:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def _get_icd_code_name_scraping(code: str) -> str:
@@ -513,6 +585,7 @@ def _transform_icd_codes(severity_codes: List[str], db_config: Optional[Dict[str
     """
     Transform ICD codes to human-readable names.
     First tries database lookup via SSH, then falls back to scraping icd10data.com.
+    Opens database connection once and reuses it for all codes.
     
     Args:
         severity_codes: List of ICD codes (e.g., ["A41.9", "B95.3"])
@@ -542,25 +615,63 @@ def _transform_icd_codes(severity_codes: List[str], db_config: Optional[Dict[str
     
     # Transform to names (database first, then scraping)
     code_names = []
-    for code in normalized_codes:
+    
+    # Try to use database if config is available
+    db_available = False
+    if db_config and db_config.get('ssh_host'):
         try:
-            logger.info(f"Fetching ICD description for {code}...")
-            name = _get_icd_code_name(code, db_config)
-            code_names.append({
-                'code': code,
-                'name': name
-            })
-            # Add small delay only if we used scraping (database is fast)
-            if not db_config or not db_config.get('ssh_host') or name == code:
-                time.sleep(1)  # Small delay to avoid rate limiting
+            # Open connection once and reuse for all codes
+            with _get_db_connection_with_tunnel(db_config) as (connection, cursor):
+                db_available = True
+                logger.info(f"Opened database connection for {len(normalized_codes)} ICD codes")
+                
+                for code in normalized_codes:
+                    try:
+                        logger.info(f"Fetching ICD description for {code} from database...")
+                        name = _query_icd_code_from_db(code, cursor)
+                        
+                        # If not found in database, will fall back to scraping
+                        if name:
+                            code_names.append({
+                                'code': code,
+                                'name': name
+                            })
+                        else:
+                            # Mark for scraping fallback
+                            code_names.append({
+                                'code': code,
+                                'name': None  # Will be filled by scraping
+                            })
+                    except Exception as e:
+                        logger.warning(f"Error querying database for {code}: {e}. Will try scraping.")
+                        code_names.append({
+                            'code': code,
+                            'name': None  # Will be filled by scraping
+                        })
         except Exception as e:
-            # If individual code fails, use original code as name
-            logger.warning(f"Failed to get description for {code}: {e}. Using original code.")
-            code_names.append({
-                'code': code,
-                'name': code  # Fallback to original code
-            })
-            time.sleep(0.5)  # Shorter delay on error
+            logger.warning(f"Failed to open database connection: {e}. Falling back to scraping for all codes.")
+            db_available = False
+    
+    # If database wasn't used or some codes weren't found, use scraping
+    if not db_available:
+        # Initialize all codes for scraping
+        code_names = [{'code': code, 'name': None} for code in normalized_codes]
+    
+    # Fill in missing names using scraping
+    for item in code_names:
+        if item['name'] is None:
+            code = item['code']
+            try:
+                logger.info(f"Fetching ICD description for {code} via scraping...")
+                name = _get_icd_code_name_scraping(code)
+                item['name'] = name
+                # Add small delay to avoid rate limiting
+                time.sleep(1)
+            except Exception as e:
+                # If scraping fails, use original code as name
+                logger.warning(f"Failed to get description for {code}: {e}. Using original code.")
+                item['name'] = code
+                time.sleep(0.5)  # Shorter delay on error
     
     # Create combined string
     # If name equals code (not found), just show the code; otherwise show "code (name)"

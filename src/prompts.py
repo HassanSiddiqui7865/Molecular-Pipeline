@@ -10,7 +10,9 @@ CONTEXT: Pathogen: {pathogen_display}{resistance_context} | Severity: {severity_
 
 SOURCE: {content}
 
-TASK: Extract only antibiotics effective against {pathogen_display}{resistance_task}. Extract ALL available information - do not leave fields null if data exists.
+CRITICAL: Extract STRICTLY based on the input context above. Do NOT extract antibiotics or information for other pathogens, conditions, or patient scenarios.
+
+TASK: Extract ONLY antibiotics effective against {pathogen_display}{resistance_task} matching the provided context. Extract ALL available information - do not leave fields null if data exists.
 
 FIELDS:
 
@@ -18,7 +20,7 @@ medical_name: Title Case drug name only. Combinations: convert "Drug1/Drug2", "D
 
 category: "first_choice" (first-line/preferred/primary), "second_choice" (alternatives/backup), "alternative_antibiotic" (salvage/last resort), or "not_known" (cannot determine). Use contextual clues (order, emphasis) if not explicit.
 
-coverage_for: Format "[Pathogen] [condition]". Use pathogen matching {pathogen_display}. Condition based on sample type: Blood/systemic → "bacteremia" or "sepsis" (prefer bacteremia), Urine → "UTI" or "urinary tract infection", Sputum/Respiratory → "pneumonia" or "respiratory infection", CSF → "meningitis", Wound → "wound infection", Other → use appropriate condition from source. Example: "Staphylococcus aureus bacteremia" or "Escherichia coli UTI".
+coverage_for: Format "[Pathogen] [condition]". Use ONLY pathogen matching {pathogen_display} from the input context. Condition based on sample type: Blood/systemic → "bacteremia" or "sepsis" (prefer bacteremia), Urine → "UTI" or "urinary tract infection", Sputum/Respiratory → "pneumonia" or "respiratory infection", CSF → "meningitis", Wound → "wound infection", Other → use appropriate condition from source. Example: "Staphylococcus aureus bacteremia" or "Escherichia coli UTI".
 
 route_of_administration: Extract from explicit mentions ("IV", "intravenous", "PO", "oral", "IM") or infer from dosing. Values: "IV", "PO", "IM", or "IV/PO". Use null only if no route info exists.
 
@@ -117,7 +119,7 @@ UNIFICATION RULES:
 
 7. is_combined: True if ANY source has is_combined=True OR medical_name contains "plus" (case-insensitive). False only if ALL indicate not combined.
 
-8. is_complete: TRUE only if ALL required fields present AND dose_duration COMPLETE. Required: medical_name, coverage_for, route_of_administration, dose_duration (dose+freq+duration), renal_adjustment (may be null), general_considerations (may be null). FALSE if any missing OR dose_duration incomplete.
+8. is_complete: TRUE only if ALL fields are present AND complete. ALL fields are REQUIRED: medical_name, coverage_for, route_of_administration, dose_duration (must be COMPLETE with dose+freq+duration), renal_adjustment, general_considerations. FALSE if ANY field is missing, null, or incomplete. CRITICAL: If dose_duration is incomplete (missing dose, frequency, or duration), set dose_duration to null (so enrichment can extract it) and set is_complete to FALSE.
 
 CONFLICT RESOLUTION: dose_duration: guideline > protocol > textbook > case report. route: combine unless contradictory. renal_adjustment: most restrictive threshold. coverage_for: most specific. general_considerations: combine unique points, remove duplicates.
 
@@ -165,6 +167,8 @@ DOSAGE_EXTRACTION_PROMPT_TEMPLATE = """Extract ONLY missing fields for {medical_
 
 PATIENT: Age={patient_age} | ICD={icd_codes}{gene_context}
 
+CRITICAL: Extract STRICTLY based on the input context above. Do NOT extract information for other conditions, ICD codes, ages, or scenarios.
+
 MISSING FIELDS (extract ONLY these): {missing_fields}
 
 EXISTING DATA (context only, preserve if not missing):
@@ -175,11 +179,11 @@ EXISTING DATA (context only, preserve if not missing):
 
 FIELDS (extract ONLY if in missing_fields):
 
-dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Match ICD: {icd_codes}{gene_matching}, Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. Choose ONE most appropriate. Use null if no dosing info.
+dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Match to ICD: {icd_codes}{gene_matching} and Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. Choose ONE most appropriate. Use null if no dosing info.
 
 route_of_administration: Extract from explicit mentions or infer from dosing. Values: "IV", "PO", "IM", or "IV/PO". Use null if no route info.
 
-coverage_for: Format "[Pathogen] [condition]" using clinical terminology (e.g., "MRSA bacteremia", "VRE bacteremia"). Match patient's clinical condition. Use null if no info.
+coverage_for: Format "[Pathogen] [condition]" using clinical terminology (e.g., "MRSA bacteremia", "VRE bacteremia"). Match to patient's clinical condition (ICD: {icd_codes}{gene_context}). Use null if no info.
 
 renal_adjustment: "No Renal Adjustment" if explicitly stated. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Use null if not mentioned. Do not duplicate general_considerations.
 
@@ -187,7 +191,7 @@ general_considerations: Extract monitoring, warnings, toxicity, interactions, co
 
 CRITICAL RULES:
 1. Extract ONLY fields in missing_fields - preserve existing for others
-2. Match dose_duration to ICD: {icd_codes}{gene_matching}, Age: {patient_age}
+2. Match to input context: ICD: {icd_codes}{gene_matching}, Age: {patient_age}
 3. Frequency MUST include "q" prefix (q8h, q12h, q24h)
 4. DO NOT invent information - use only what's in content
 5. Maintain consistency with existing data AND previous chunks context

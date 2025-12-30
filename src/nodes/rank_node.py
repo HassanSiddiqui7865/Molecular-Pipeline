@@ -447,6 +447,10 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             if medical_name:
                                 all_unique_antibiotics.add(medical_name)
         
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
         # Filter antibiotics using LLM if we have any
         antibiotics_to_keep = set(all_unique_antibiotics)
         filtered_out_antibiotics = []
@@ -465,6 +469,10 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             sample = input_params.get('sample')
             systemic = input_params.get('systemic')
             
+            # Emit progress for filtering start
+            if progress_callback:
+                progress_callback('rank', 10, f'Filtering {len(all_unique_antibiotics)} antibiotics...')
+            
             # Filter antibiotics
             filtering_result = _filter_antibiotics_with_llm(
                 unique_antibiotics=list(all_unique_antibiotics),
@@ -475,6 +483,10 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 sample=sample,
                 systemic=systemic
             )
+            
+            # Emit progress for filtering complete
+            if progress_callback:
+                progress_callback('rank', 80, f'Filtered {len(filtering_result.get("filtered_out", []))} antibiotics')
             
             antibiotics_to_keep = filtering_result.get('antibiotics_to_keep', set(all_unique_antibiotics))
             filtered_out_antibiotics = filtering_result.get('filtered_out', [])

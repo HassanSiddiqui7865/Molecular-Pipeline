@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Molecular Pipeline - Antibiotic Therapy Recommendations</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Molecular Pipeline</h1>
+            <p>Antibiotic Therapy Recommendations Generator</p>
+        </header>
+
+        <div class="main-content">
+            <div class="input-section">
+                <h2>Input Parameters (JSON)</h2>
+                <textarea id="jsonInput" placeholder='Enter JSON input, e.g.:
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Staphylococcus aureus",
+      "pathogen_count": "10^3 CFU/ML"
+    }
+  ],
+  "resistant_genes": ["mecA"],
+  "severity_codes": ["A41.2"],
+  "age": 32,
+  "sample": "Blood",
+  "systemic": true
+}'></textarea>
+                <div class="button-group">
+                    <button id="loadExample" class="btn btn-secondary">Load Example</button>
+                    <button id="runPipeline" class="btn btn-primary">Run Pipeline</button>
+                </div>
+            </div>
+
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <h2>Pipeline Progress</h2>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                <div class="progress-log" id="progressLog"></div>
+            </div>
+
+            <div class="result-section" id="resultSection" style="display: none;">
+                <h2>Results</h2>
+                <div class="result-actions">
+                    <button id="downloadJson" class="btn btn-secondary">Download JSON</button>
+                    <button id="viewJson" class="btn btn-secondary">View Raw JSON</button>
+                </div>
+                <div id="resultContent"></div>
+            </div>
+
+            <div class="sessions-section">
+                <h2>Past Executions</h2>
+                <div class="sessions-controls">
+                    <button id="refreshSessions" class="btn btn-secondary">Refresh</button>
+                </div>
+                <div class="sessions-table-container">
+                    <table class="sessions-table" id="sessionsTable">
+                        <thead>
+                            <tr>
+                                <th>Session ID</th>
+                                <th>Status</th>
+                                <th>Progress</th>
+                                <th>Stage</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sessionsTableBody">
+                            <tr>
+                                <td colspan="6" class="loading">Loading sessions...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+

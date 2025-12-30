@@ -89,6 +89,11 @@ def _get_selenium_driver() -> Optional[Any]:
         
         driver = webdriver.Chrome(options=chrome_options)
         
+        # Set reasonable timeouts (will retry on failure)
+        driver.set_page_load_timeout(120)
+        driver.implicitly_wait(10)
+        driver.set_script_timeout(120)
+        
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
                 Object.defineProperty(navigator, 'webdriver', {
@@ -121,16 +126,45 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         search_query = f"{antibiotic_name} dosage drug.com"
         logger.info(f"Searching DuckDuckGo for {antibiotic_name}...")
         
-        driver.get("https://duckduckgo.com/")
-        time.sleep(random.uniform(1.5, 3.0))
+        # Retry page load for DuckDuckGo
+        max_retries = 3
+        retry_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                driver.get("https://duckduckgo.com/")
+                time.sleep(random.uniform(1.5, 3.0))
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"DuckDuckGo page load failed (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.warning(f"DuckDuckGo page load failed after {max_retries} attempts: {e}")
+                    return None
         
-        try:
-            search_box = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "searchbox_input"))
-            )
-            
-            if not search_box:
-                search_box = driver.find_element(By.CSS_SELECTOR, "input[name='q']")
+        # Retry waiting for search box
+        search_box = None
+        for attempt in range(max_retries):
+            try:
+                search_box = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, "searchbox_input"))
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Search box not found (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    # Try fallback selector
+                    try:
+                        search_box = driver.find_element(By.CSS_SELECTOR, "input[name='q']")
+                        break
+                    except:
+                        logger.warning(f"Search box not found after {max_retries} attempts: {e}")
+                        return None
+        
+        if not search_box:
+            return None
             
             driver.execute_script("arguments[0].scrollIntoView(true);", search_box)
             time.sleep(random.uniform(0.3, 0.7))
@@ -260,9 +294,20 @@ def _validate_antibiotic_match(
     try:
         logger.info(f"Validating antibiotic match for {antibiotic_name} at {url}...")
         
-        # Navigate to page and get title
-        driver.get(url)
-        time.sleep(random.uniform(1.5, 2.5))
+        # Retry page load with exponential backoff
+        max_retries = 3
+        retry_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                driver.get(url)
+                time.sleep(random.uniform(1.5, 2.5))
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Page load failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.warning(f"Page load failed after {max_retries} attempts for {url}: {e}, continuing with title check")
         
         # Get page title
         page_title = driver.title if driver.title else ""
@@ -325,38 +370,72 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
     
     try:
         logger.info(f"Navigating directly to {url}...")
-        driver.get(url)
-        time.sleep(random.uniform(2.0, 3.5))
         
-        try:
-            content_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "content"))
-            )
-            
-            text = content_element.text
-            
-            lines = (line.strip() for line in text.splitlines())
-            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            text = ' '.join(chunk for chunk in chunks if chunk)
-            
-            logger.info(f"Extracted {len(text)} characters from #content element")
-            return text
-            
-        except Exception as e:
-            logger.warning(f"Could not find #content element, trying fallback: {e}")
-            page_source = driver.page_source
-            soup = BeautifulSoup(page_source, 'html.parser')
+        # Retry page load with exponential backoff
+        max_retries = 3
+        retry_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                driver.get(url)
+                time.sleep(random.uniform(2.0, 3.5))
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Page load failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.warning(f"Page load failed after {max_retries} attempts for {url}: {e}")
+                    return None
         
-        for script in soup(["script", "style"]):
-            script.decompose()
+        # Retry waiting for content element
+        max_wait_retries = 3
+        content_element = None
+        for attempt in range(max_wait_retries):
+            try:
+                content_element = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "content"))
+                )
+                break
+            except Exception as e:
+                if attempt < max_wait_retries - 1:
+                    logger.warning(f"Content element not found (attempt {attempt + 1}/{max_wait_retries}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.warning(f"Content element not found after {max_wait_retries} attempts: {e}")
         
-        text = soup.get_text()
+        if not content_element:
+            # Try fallback method
+            logger.warning(f"Could not find #content element, trying fallback method...")
+            try:
+                page_source = driver.page_source
+                soup = BeautifulSoup(page_source, 'html.parser')
+                
+                for script in soup(["script", "style"]):
+                    script.decompose()
+                
+                text = soup.get_text()
+                lines = (line.strip() for line in text.splitlines())
+                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                text = ' '.join(chunk for chunk in chunks if chunk)
+                
+                logger.info(f"Extracted {len(text)} characters (fallback method)")
+                return text
+            except Exception as e:
+                logger.error(f"Fallback extraction also failed: {e}")
+                return None
+        
+        text = content_element.text
+        
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = ' '.join(chunk for chunk in chunks if chunk)
         
-        logger.info(f"Extracted {len(text)} characters (fallback method)")
+        logger.info(f"Extracted {len(text)} characters from #content element")
         return text
+        
+    except Exception as e:
+        logger.error(f"Error scraping {url}: {e}")
+        return None
         
     except Exception as e:
         logger.error(f"Error scraping {url}: {e}")
@@ -846,6 +925,12 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'alternative_antibiotic': []
         }
         
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        total_to_process = len(first_choice_ab) + len(second_choice_ab) + len(alternative_ab)
+        processed_count = 0
+        
         # Process first_choice and second_choice sequentially
         # For first_choice and second_choice: if extraction fails (no required fields), drop the antibiotic
         for antibiotic, category, idx, missing_fields in first_choice_ab + second_choice_ab:
@@ -906,12 +991,23 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 if not updated or (missing_fields and not required_fields_updated):
                     logger.warning(f"  No required fields extracted for {medical_name}, removing from {category} (first_choice/second_choice require extraction)")
                     antibiotics_to_remove[category].append(idx)
+                    # Emit progress even if failed
+                    if progress_callback and total_to_process > 0:
+                        processed_count += 1
+                        sub_progress = (processed_count / total_to_process) * 100.0
+                        progress_callback('enrichment', sub_progress, f'Processed {processed_count}/{total_to_process} antibiotics')
                     continue
                 
                 if updated:
                     logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete={antibiotic['is_complete']})")
                 else:
                     logger.warning(f"  No fields updated for {medical_name}")
+                
+                # Emit progress for this antibiotic
+                if progress_callback and total_to_process > 0:
+                    processed_count += 1
+                    sub_progress = (processed_count / total_to_process) * 100.0
+                    progress_callback('enrichment', sub_progress, f'Enriched {processed_count}/{total_to_process} antibiotics')
                 
             except Exception as e:
                 logger.error(f"Error processing {medical_name}: {e}", exc_info=True)
@@ -975,13 +1071,14 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     
                     # Step 3: Process sequentially, trying to get enough complete ones
                     # For alternative_antibiotic: if extraction fails for one, we can try others
-                    processed_count = 0
+                    # Note: processed_count continues from first_choice/second_choice processing above
                     successfully_completed = []
                     processed_indices = set()
+                    alternative_completed = 0
                     
                     # Process enough to reach 5 total complete entries
                     for (category, idx), (page_content, missing_fields, antibiotic, num_chunks, _) in sorted_alternatives:
-                        if processed_count >= needed:
+                        if alternative_completed >= needed:
                             break
                         
                         medical_name = antibiotic.get('medical_name', 'unknown')
@@ -1020,9 +1117,8 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             processed_indices.add(idx)
                             
                             if antibiotic['is_complete']:
-                                processed_count += 1
                                 successfully_completed.append((category, idx))
-                                logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete=True, {processed_count}/{needed} needed)")
+                                logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete=True)")
                             elif updated:
                                 # Got some fields but not complete - keep it for alternative_antibiotic
                                 logger.info(f"  ✓ Updated fields for {medical_name} but not yet complete (is_complete={antibiotic['is_complete']})")
@@ -1030,6 +1126,12 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 # Extraction failed completely - for alternative_antibiotic, we can try others, but remove this one
                                 logger.warning(f"  No fields extracted for {medical_name}, will try others if needed")
                                 antibiotics_to_remove[category].append(idx)
+                            
+                            # Emit progress for this antibiotic
+                            if progress_callback and total_to_process > 0:
+                                processed_count += 1
+                                sub_progress = (processed_count / total_to_process) * 100.0
+                                progress_callback('enrichment', sub_progress, f'Enriched {processed_count}/{total_to_process} antibiotics')
                             
                         except Exception as e:
                             logger.error(f"Error processing {medical_name}: {e}", exc_info=True)
@@ -1061,21 +1163,21 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         ab_name = removed_ab.get('medical_name', 'unknown') if isinstance(removed_ab, dict) else 'unknown'
                         logger.info(f"Removed {ab_name} from {category} (validation failed - drug name doesn't match)")
         
-        # Final cleanup: Remove incomplete alternative_antibiotic if we already have 5+ complete ones
-        alternative_antibiotics = therapy_plan.get('alternative_antibiotic', [])
-        if isinstance(alternative_antibiotics, list):
-            complete_alternatives = [ab for ab in alternative_antibiotics if ab.get('is_complete', False)]
-            incomplete_alternatives = [ab for ab in alternative_antibiotics if not ab.get('is_complete', False)]
-            
-            if len(complete_alternatives) >= 5:
-                logger.info(f"Found {len(complete_alternatives)} complete alternative_antibiotic entries (>= 5), removing {len(incomplete_alternatives)} incomplete ones")
-                # Keep only complete ones
-                therapy_plan['alternative_antibiotic'] = complete_alternatives
-                for ab in incomplete_alternatives:
-                    ab_name = ab.get('medical_name', 'unknown')
-                    logger.info(f"Removed incomplete {ab_name} from alternative_antibiotic (already have 5+ complete)")
-            else:
-                logger.info(f"Found {len(complete_alternatives)} complete alternative_antibiotic entries (< 5), keeping {len(incomplete_alternatives)} incomplete ones")
+        # Final cleanup: Remove ALL incomplete records from ALL categories
+        for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
+            antibiotics = therapy_plan.get(category, [])
+            if isinstance(antibiotics, list):
+                complete_antibiotics = [ab for ab in antibiotics if ab.get('is_complete', False)]
+                incomplete_antibiotics = [ab for ab in antibiotics if not ab.get('is_complete', False)]
+                
+                if incomplete_antibiotics:
+                    logger.info(f"Removing {len(incomplete_antibiotics)} incomplete entries from {category} (keeping {len(complete_antibiotics)} complete)")
+                    for ab in incomplete_antibiotics:
+                        ab_name = ab.get('medical_name', 'unknown')
+                        logger.info(f"  Removed incomplete {ab_name} from {category}")
+                    
+                    # Keep only complete ones
+                    therapy_plan[category] = complete_antibiotics
         
         logger.info("Enrichment complete")
         
