@@ -165,7 +165,8 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         
         if not search_box:
             return None
-            
+        
+        try:
             driver.execute_script("arguments[0].scrollIntoView(true);", search_box)
             time.sleep(random.uniform(0.3, 0.7))
             

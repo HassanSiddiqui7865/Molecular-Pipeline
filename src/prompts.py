@@ -10,6 +10,8 @@ CONTEXT: Pathogen: {pathogen_display}{resistance_context} | Severity: {severity_
 
 SOURCE: {content}
 
+NOTE: The source content may contain unformatted guidelines, research papers, or medical literature with markdown formatting, citation markers (e.g., **(A-III)**, [1, 2]), reference numbers, table structures, incomplete sentences, and mixed formatting. Parse through this content carefully to extract relevant antibiotic information, ignoring formatting artifacts and focusing on the actual medical recommendations and dosing information.
+
 CRITICAL: Extract STRICTLY based on the input context above. Do NOT extract antibiotics or information for other pathogens, conditions, or patient scenarios.
 
 TASK: Extract ONLY antibiotics effective against {pathogen_display}{resistance_task} matching the provided context. Extract ALL available information - do not leave fields null if data exists.
@@ -185,7 +187,7 @@ route_of_administration: Extract from explicit mentions or infer from dosing. Va
 
 coverage_for: Format "[Pathogen] [condition]" using clinical terminology (e.g., "MRSA bacteremia", "VRE bacteremia"). Match to patient's clinical condition (ICD: {icd_codes}{gene_context}). Use null if no info.
 
-renal_adjustment: "No Renal Adjustment" if explicitly stated. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Use null if not mentioned. Do not duplicate general_considerations.
+renal_adjustment: "No Renal Adjustment" if explicitly stated OR if not found/not mentioned. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Default to "No Renal Adjustment" if not mentioned. Do not duplicate general_considerations.
 
 general_considerations: Extract monitoring, warnings, toxicity, interactions, contraindications. Separate with semicolons. Exclude dosing, drug class descriptions. Use null if no info.
 
