@@ -117,3 +117,4 @@ class DosageExtractionResult(BaseModel):
     general_considerations: Optional[str] = None
     coverage_for: Optional[str] = None
     renal_adjustment: Optional[str] = None
+

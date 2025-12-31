@@ -14,7 +14,7 @@ from schemas import SearchResult, CombinedExtractionResult
 from prompts import EXTRACTION_PROMPT_TEMPLATE
 from utils import (format_resistance_genes, get_icd_names_from_state, 
                    get_pathogens_from_input, format_pathogens, 
-                   get_resistance_genes_from_input, create_llm)
+                   get_resistance_genes_from_input, create_llm, retry_with_max_attempts, RetryError)
 
 logger = logging.getLogger(__name__)
 
@@ -98,48 +98,46 @@ def _extract_with_llamaindex(
         allergy_filtering_rule=allergy_filtering_rule
     )
     
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            program = LLMTextCompletionProgram.from_defaults(
-                output_cls=CombinedExtractionResult,
-                llm=llm,
-                prompt_template_str="{input_str}",
-                verbose=False
-            )
-            
-            result = program(input_str=prompt)
-            
-            if not result:
-                logger.warning(f"Empty result from {source_title} (attempt {attempt}), retrying...")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-            
-            result_dict = result.model_dump()
-            
-            # Post-process to fix is_combined, route extraction, and frequency conversion
-            result_dict = _post_process_extraction_result(result_dict)
-            
-            # Log summary
-            therapy = result_dict.get('antibiotic_therapy_plan', {})
-            logger.info(
-                f"Extracted from '{source_title[:50]}...': "
-                f"first={len(therapy.get('first_choice', []))}, "
-                f"second={len(therapy.get('second_choice', []))}, "
-                f"alt={len(therapy.get('alternative_antibiotic', []))}, "
-                f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
-            )
-            
-            return result_dict
-            
-        except Exception as e:
-            logger.warning(
-                f"Extraction error from {source_title} (attempt {attempt}): {e}"
-            )
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+    def _perform_extraction():
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=CombinedExtractionResult,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        return result_dict
+    
+    try:
+        result_dict = retry_with_max_attempts(
+            operation=_perform_extraction,
+            operation_name=f"LLM extraction from {source_title}",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
+        
+        # Post-process to fix is_combined, route extraction, and frequency conversion
+        result_dict = _post_process_extraction_result(result_dict)
+        
+        # Log summary
+        therapy = result_dict.get('antibiotic_therapy_plan', {})
+        logger.info(
+            f"Extracted from '{source_title[:50]}...': "
+            f"first={len(therapy.get('first_choice', []))}, "
+            f"second={len(therapy.get('second_choice', []))}, "
+            f"alt={len(therapy.get('alternative_antibiotic', []))}, "
+            f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
+        )
+        
+        return result_dict
+        
+    except RetryError as e:
+        logger.error(f"Extraction failed after max attempts for {source_title}: {e}")
+        raise
 
 
 def _empty_result() -> Dict[str, Any]:
@@ -272,6 +270,21 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         sub_progress = (completed_count / total_sources) * 100.0
                         progress_callback('extract', sub_progress, f'Extracted {completed_count}/{total_sources} sources')
                     
+                except RetryError as e:
+                    error_msg = f"Extraction failed for source {idx}: {e.operation_name} - {str(e)}"
+                    logger.error(error_msg)
+                    # Record error in state
+                    if 'errors' not in state:
+                        state['errors'] = []
+                    state['errors'].append(error_msg)
+                    # Return empty result for this source instead of stopping entire pipeline
+                    return {
+                        'source_url': result.url,
+                        'source_title': result.title,
+                        'source_index': idx,
+                        'antibiotic_therapy_plan': {},
+                        'pharmacist_analysis_on_resistant_gene': []
+                    }
                 except Exception as e:
                     logger.error(f"[{idx}] Processing error: {e}", exc_info=True)
                     completed_count += 1

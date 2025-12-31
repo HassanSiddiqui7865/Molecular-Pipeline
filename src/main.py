@@ -205,18 +205,6 @@ def main():
         logger.info(f"Result: {first_count} first_choice, {second_count} second_choice, {alt_count} alternative antibiotics")
     
     logger.info(f"Extraction complete")
-    
-    # Optionally export to PDF
-    try:
-        # Use xhtml2pdf (pisa) - pure Python, no system dependencies
-        from export_pdf import export_to_pdf
-        pdf_path = export_to_pdf(output_data)
-        logger.info(f"PDF report exported to: {pdf_path}")
-    except ImportError as e:
-        logger.warning(f"PDF export not available: {e}")
-        logger.info("Install xhtml2pdf: pip install xhtml2pdf")
-    except Exception as e:
-        logger.warning(f"Error exporting PDF: {e}")
 
 
 if __name__ == "__main__":

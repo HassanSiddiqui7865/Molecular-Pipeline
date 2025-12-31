@@ -11,7 +11,7 @@ from collections import defaultdict
 
 from schemas import UnifiedResistanceGenesResult, UnifiedAntibioticEntryForSynthesis
 from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE
-from utils import format_resistance_genes, get_icd_names_from_state, create_llm, clean_null_strings
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm, clean_null_strings, normalize_antibiotic_name, retry_with_max_attempts, RetryError
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +25,6 @@ except ImportError:
     LLMTextCompletionProgram = None
 
 
-def _normalize_antibiotic_name(name: str) -> str:
-    """
-    Normalize antibiotic name for comparison (case-insensitive, handle hyphens/dashes).
-    
-    Args:
-        name: Antibiotic name to normalize
-        
-    Returns:
-        Normalized name for comparison
-    """
-    if not name:
-        return ""
-    # Convert to lowercase, replace different dash types with standard hyphen
-    normalized = name.lower().strip()
-    normalized = normalized.replace('–', '-').replace('—', '-').replace('−', '-')
-    return normalized
 
 
 
@@ -48,14 +32,16 @@ def _normalize_antibiotic_name(name: str) -> str:
 def _unify_antibiotic_group_with_llm(
     antibiotic_name: str,
     entries: List[Dict[str, Any]],
+    route_of_administration: str = '',
     retry_delay: float = 2.0
 ) -> Dict[str, Any]:
     """
-    Unify multiple entries of the same antibiotic using LLM.
+    Unify multiple entries of the same antibiotic with the same route using LLM.
     
     Args:
         antibiotic_name: The antibiotic name
-        entries: List of entries for this antibiotic from different sources
+        entries: List of entries for this antibiotic from different sources (all with same route)
+        route_of_administration: The route of administration for this group
         retry_delay: Initial delay between retries in seconds
         
     Returns:
@@ -92,8 +78,11 @@ def _unify_antibiotic_group_with_llm(
     entries_list = "\n\n".join(entries_text)
     
     # Use prompt template from prompts.py
+    # All entries in this group have the same route
+    route_display = route_of_administration if route_of_administration else 'null'
     prompt = ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE.format(
         antibiotic_name=antibiotic_name,
+        route_of_administration=route_display,
         entries_list=entries_list
     )
 
@@ -105,70 +94,70 @@ def _unify_antibiotic_group_with_llm(
         entry.pop('original_category', None)
         return entry
     
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            # Use LlamaIndex with schema from schemas.py
-            program = LLMTextCompletionProgram.from_defaults(
-                output_cls=UnifiedAntibioticEntryForSynthesis,
-                llm=llm,
-                prompt_template_str="{input_str}",
-                verbose=False
-            )
-            
-            result = program(input_str=prompt)
-            
-            if not result:
-                logger.warning(f"Empty result for {antibiotic_name} (attempt {attempt}), retrying...")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-            
-            result_dict = result.model_dump()
-            
-            # Trust LLM's output completely - it will set dose_duration to null if incomplete per prompt
-            unified = {
-                'medical_name': result_dict.get('medical_name', antibiotic_name),
-                'coverage_for': result_dict.get('coverage_for') if result_dict.get('coverage_for') else None,
-                'route_of_administration': result_dict.get('route_of_administration') if result_dict.get('route_of_administration') else None,
-                'dose_duration': result_dict.get('dose_duration') if result_dict.get('dose_duration') else None,
-                'renal_adjustment': result_dict.get('renal_adjustment') if result_dict.get('renal_adjustment') else None,
-                'general_considerations': result_dict.get('general_considerations') if result_dict.get('general_considerations') else None,
-                'is_combined': result_dict.get('is_combined', False),
-                'is_complete': result_dict.get('is_complete', False)  # LLM determines this based on prompt
-            }
-            
-            # Ensure is_complete is always present
-            if 'is_complete' not in unified:
-                unified['is_complete'] = False
-            
-            # Clean null strings
-            for key, value in unified.items():
-                if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
-                    unified[key] = None
-            
-            # CRITICAL FALLBACK: If LLM returned null for dose_duration but entries have it, use the most complete one
-            if unified.get('dose_duration') is None:
-                available_dose_durations = [e.get('dose_duration') for e in entries if e.get('dose_duration')]
-                if available_dose_durations:
-                    # Prioritize complete ones (with duration), then incomplete ones
-                    complete_ones = [d for d in available_dose_durations if 'for' in d.lower() or 'week' in d.lower() or 'day' in d.lower()]
-                    if complete_ones:
-                        # Use the most comprehensive complete one
-                        unified['dose_duration'] = max(complete_ones, key=lambda x: len(x))
-                        logger.info(f"Fallback: Used dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
-                    else:
-                        # Use the longest incomplete one
-                        unified['dose_duration'] = max(available_dose_durations, key=lambda x: len(x))
-                        logger.info(f"Fallback: Used incomplete dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
-            
-            return unified
-            
-        except Exception as e:
-            logger.warning(f"Error unifying {antibiotic_name} (attempt {attempt}): {e}")
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+    def _perform_unification():
+        # Use LlamaIndex with schema from schemas.py
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=UnifiedAntibioticEntryForSynthesis,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        return result_dict
+    
+    try:
+        result_dict = retry_with_max_attempts(
+            operation=_perform_unification,
+            operation_name=f"LLM unification for {antibiotic_name}",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
+        
+        # Trust LLM's output completely - it will set dose_duration to null if incomplete per prompt
+        unified = {
+            'medical_name': result_dict.get('medical_name', antibiotic_name),
+            'coverage_for': result_dict.get('coverage_for') if result_dict.get('coverage_for') else None,
+            'route_of_administration': result_dict.get('route_of_administration') if result_dict.get('route_of_administration') else None,
+            'dose_duration': result_dict.get('dose_duration') if result_dict.get('dose_duration') else None,
+            'renal_adjustment': result_dict.get('renal_adjustment') if result_dict.get('renal_adjustment') else None,
+            'general_considerations': result_dict.get('general_considerations') if result_dict.get('general_considerations') else None,
+            'is_combined': result_dict.get('is_combined', False),
+            'is_complete': result_dict.get('is_complete', False)  # LLM determines this based on prompt
+        }
+        
+        # Ensure is_complete is always present
+        if 'is_complete' not in unified:
+            unified['is_complete'] = False
+        
+        # Clean null strings
+        for key, value in unified.items():
+            if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
+                unified[key] = None
+        
+        # CRITICAL FALLBACK: If LLM returned null for dose_duration but entries have it, use the most complete one
+        if unified.get('dose_duration') is None:
+            available_dose_durations = [e.get('dose_duration') for e in entries if e.get('dose_duration')]
+            if available_dose_durations:
+                # Prioritize complete ones (with duration), then incomplete ones
+                complete_ones = [d for d in available_dose_durations if 'for' in d.lower() or 'week' in d.lower() or 'day' in d.lower()]
+                if complete_ones:
+                    # Use the most comprehensive complete one
+                    unified['dose_duration'] = max(complete_ones, key=lambda x: len(x))
+                    logger.info(f"Fallback: Used dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
+                else:
+                    # Use the longest incomplete one
+                    unified['dose_duration'] = max(available_dose_durations, key=lambda x: len(x))
+                    logger.info(f"Fallback: Used incomplete dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
+        
+        return unified
+        
+    except RetryError as e:
+        logger.error(f"Unification failed after max attempts for {antibiotic_name}: {e}")
+        raise
 
 
 def _determine_final_category(
@@ -280,41 +269,36 @@ def _unify_resistance_genes_with_llm(
                 unified_genes.append(entries[0].copy())
         return unified_genes
     
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            # Use LlamaIndex with schema from schemas.py
-            program = LLMTextCompletionProgram.from_defaults(
-                output_cls=UnifiedResistanceGenesResult,
-                llm=llm,
-                prompt_template_str="{input_str}",
-                verbose=False
-            )
-            
-            result = program(input_str=prompt)
-            
-            if not result:
-                logger.warning(f"Empty result for resistance genes (attempt {attempt}), retrying...")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-            
-            result_dict = result.model_dump()
-            resistance_genes = result_dict.get('resistance_genes', [])
-            
-            if resistance_genes:
-                return [clean_null_strings(entry) for entry in resistance_genes]
-            else:
-                logger.warning(f"LLM returned no resistance genes (attempt {attempt}), retrying...")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-                
-        except Exception as e:
-            logger.warning(f"Error unifying resistance genes (attempt {attempt}): {e}")
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+    def _perform_gene_unification():
+        # Use LlamaIndex with schema from schemas.py
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=UnifiedResistanceGenesResult,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        resistance_genes = result_dict.get('resistance_genes', [])
+        if not resistance_genes:
+            return []  # Empty list is valid, but we'll retry if needed
+        return [clean_null_strings(entry) for entry in resistance_genes]
+    
+    try:
+        unified_genes = retry_with_max_attempts(
+            operation=_perform_gene_unification,
+            operation_name="LLM resistance gene unification",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
+        return unified_genes
+        
+    except RetryError as e:
+        logger.error(f"Resistance gene unification failed after max attempts: {e}")
+        raise
 
 
 def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -345,7 +329,6 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         total_sources = len(source_results)
         
-        # Step 1: Group all antibiotics by normalized name across all sources and categories
         antibiotic_groups = defaultdict(list)
         
         for source_result in source_results:
@@ -367,12 +350,21 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         continue
                     
                     # Normalize name for grouping
-                    normalized_name = _normalize_antibiotic_name(medical_name)
+                    normalized_name = normalize_antibiotic_name(medical_name)
                     if not normalized_name:
                         continue
                     
+                    # Get route_of_administration for grouping key
+                    route = antibiotic.get('route_of_administration', '').strip() if antibiotic.get('route_of_administration') else ''
+                    # Normalize route (handle None, empty strings, etc.)
+                    route_key = route if route else 'null'
+                    
+                    # Create grouping key: (normalized_name, route)
+                    # This ensures same drug with different routes are in different groups
+                    group_key = (normalized_name, route_key)
+                    
                     # Add entry with source info
-                    antibiotic_groups[normalized_name].append({
+                    antibiotic_groups[group_key].append({
                         **antibiotic,
                         'source_index': source_index,
                         'original_category': category
@@ -389,16 +381,21 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         total_antibiotics = len(antibiotic_groups)
         unified_count = 0
         
-        for normalized_name, entries in antibiotic_groups.items():
+        for group_key, entries in antibiotic_groups.items():
+            normalized_name, route_key = group_key
             # Get source indices for this antibiotic
             source_indices = sorted(set(e.get('source_index', 0) for e in entries if e.get('source_index', 0) > 0))
             
+            # Get the route for this group (all entries should have the same route)
+            route = entries[0].get('route_of_administration', '') if entries else ''
+            
             # Unify if multiple entries
             if len(entries) > 1:
-                logger.info(f"Unifying {len(entries)} entries for {normalized_name}")
+                logger.info(f"Unifying {len(entries)} entries for {normalized_name} with route {route}")
                 unified_entry = _unify_antibiotic_group_with_llm(
                     antibiotic_name=entries[0].get('medical_name', normalized_name),
-                    entries=entries
+                    entries=entries,
+                    route_of_administration=route
                 )
             else:
                 # Single entry - use as-is
@@ -499,8 +496,18 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'result': result
         }
         
+    except RetryError as e:
+        error_msg = f"Synthesize node failed: {e.operation_name} - {str(e)}"
+        logger.error(error_msg)
+        # Record error in state and stop pipeline
+        errors = state.get('errors', [])
+        errors.append(error_msg)
+        raise Exception(error_msg) from e
     except Exception as e:
         logger.error(f"Error in synthesize_node: {e}", exc_info=True)
+        # Record error in state
+        errors = state.get('errors', [])
+        errors.append(f"Synthesize node error: {str(e)}")
         raise
 
 

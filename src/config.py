@@ -52,9 +52,12 @@ def get_output_config() -> Dict[str, Any]:
         Dictionary with output configuration
     """
     _ensure_env_loaded()
+    # Check if saving is disabled (for production)
+    save_enabled = os.getenv('SAVE_OUTPUT_TO_DISK', 'true').lower() == 'true'
     return {
         'directory': os.getenv('OUTPUT_DIRECTORY', 'output'),
-        'filename': os.getenv('OUTPUT_FILENAME', 'pathogen_info_output.json')
+        'filename': os.getenv('OUTPUT_FILENAME', 'pathogen_info_output.json'),
+        'save_enabled': save_enabled
     }
 
 

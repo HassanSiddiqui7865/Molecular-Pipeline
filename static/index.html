@@ -5,6 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Molecular Pipeline - Antibiotic Therapy Recommendations</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        #resultContent ul {
+            text-align: left !important;
+            margin-left: 0 !important;
+            padding-left: 0 !important;
+            width: 100% !important;
+        }
+        #resultContent li {
+            text-align: left !important;
+            margin-left: 0 !important;
+            padding-left: 24px !important;
+            min-height: 100px !important;
+        }
+        #resultContent li .antibiotic-header {
+            text-align: left !important;
+            margin-left: 0 !important;
+        }
+        #resultContent li .antibiotic-name {
+            text-align: left !important;
+            margin-left: 0 !important;
+        }
+        .first-line-badge {
+            margin-left: 0 !important;
+            margin-right: 12px !important;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -51,6 +77,7 @@
                 <h2>Results</h2>
                 <div class="result-actions">
                     <button id="downloadJson" class="btn btn-secondary">Download JSON</button>
+                    <button id="downloadPdf" class="btn btn-secondary">Download PDF</button>
                     <button id="viewJson" class="btn btn-secondary">View Raw JSON</button>
                 </div>
                 <div id="resultContent"></div>

@@ -54,6 +54,7 @@ const progressLog = document.getElementById('progressLog');
 const resultSection = document.getElementById('resultSection');
 const resultContent = document.getElementById('resultContent');
 const downloadJsonBtn = document.getElementById('downloadJson');
+const downloadPdfBtn = document.getElementById('downloadPdf');
 const viewJsonBtn = document.getElementById('viewJson');
 const refreshSessionsBtn = document.getElementById('refreshSessions');
 const sessionsTableBody = document.getElementById('sessionsTableBody');
@@ -221,11 +222,15 @@ function displayResults(result) {
     // Display antibiotics
     if (firstChoice.length > 0) {
         html += '<h3>First Choice Antibiotics</h3>';
-        html += '<ul>';
-        firstChoice.forEach(ab => {
-            html += `<li>
-                <strong>${ab.medical_name}</strong><br>
-                <small>${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
+        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
+        firstChoice.forEach((ab, idx) => {
+            const firstLineBadge = idx === 0 ? '<span class="first-line-badge" style="display: inline-block !important; margin-left: 0 !important; margin-right: 12px !important; text-align: center !important;">First Line</span>' : '';
+            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
+                <div class="antibiotic-header" style="text-align: left !important; margin-left: 0 !important; margin-bottom: 8px !important; display: block !important; width: 100% !important;">
+                    ${firstLineBadge}
+                    <strong class="antibiotic-name" style="text-align: left !important; margin-left: 0 !important; display: inline-block !important; vertical-align: middle !important;">${ab.medical_name}</strong>
+                </div>
+                <small style="text-align: left !important; margin-left: 0 !important; margin-top: 8px !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
             </li>`;
         });
         html += '</ul>';
@@ -233,11 +238,11 @@ function displayResults(result) {
 
     if (secondChoice.length > 0) {
         html += '<h3>Second Choice Antibiotics</h3>';
-        html += '<ul>';
+        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
         secondChoice.forEach(ab => {
-            html += `<li>
-                <strong>${ab.medical_name}</strong><br>
-                <small>${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
+            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
+                <strong style="text-align: left !important; margin-left: 0 !important; display: block !important; margin-bottom: 4px !important;">${ab.medical_name}</strong>
+                <small style="text-align: left !important; margin-left: 0 !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
             </li>`;
         });
         html += '</ul>';
@@ -245,11 +250,11 @@ function displayResults(result) {
 
     if (alternative.length > 0) {
         html += '<h3>Alternative Antibiotics</h3>';
-        html += '<ul>';
+        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
         alternative.forEach(ab => {
-            html += `<li>
-                <strong>${ab.medical_name}</strong><br>
-                <small>${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
+            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
+                <strong style="text-align: left !important; margin-left: 0 !important; display: block !important; margin-bottom: 4px !important;">${ab.medical_name}</strong>
+                <small style="text-align: left !important; margin-left: 0 !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
             </li>`;
         });
         html += '</ul>';
@@ -271,6 +276,72 @@ downloadJsonBtn.addEventListener('click', () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+});
+
+// Download PDF
+downloadPdfBtn.addEventListener('click', async () => {
+    if (!currentResult) {
+        alert('No result available to download');
+        return;
+    }
+
+    try {
+        downloadPdfBtn.disabled = true;
+        downloadPdfBtn.textContent = 'Generating PDF...';
+
+        // Prepare data for PDF generation
+        const pdfData = {
+            data: currentResult
+        };
+
+        // If we have a session_id, use it
+        if (currentSessionId) {
+            pdfData.session_id = currentSessionId;
+        }
+
+        const response = await fetch(`${API_BASE_URL}/api/download-pdf`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(pdfData)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to generate PDF');
+        }
+
+        // Get PDF blob
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        
+        // Get filename from Content-Disposition header or use default
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = `pipeline_report_${new Date().toISOString().split('T')[0]}.pdf`;
+        if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+            if (filenameMatch) {
+                filename = filenameMatch[1];
+            }
+        }
+        
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        downloadPdfBtn.disabled = false;
+        downloadPdfBtn.textContent = 'Download PDF';
+    } catch (error) {
+        console.error('Error downloading PDF:', error);
+        alert(`Error generating PDF: ${error.message}`);
+        downloadPdfBtn.disabled = false;
+        downloadPdfBtn.textContent = 'Download PDF';
+    }
 });
 
 // View raw JSON
@@ -371,6 +442,7 @@ async function loadSessions() {
             const createdAt = session.created_at ? new Date(session.created_at).toLocaleString() : '-';
             
             // For running sessions, show "Viewing" if it's the current session, otherwise show "View"
+            // For completed sessions, show both "View" and "Download PDF" buttons
             let actionButton = '';
             if (status === 'running') {
                 if (currentSessionId === sessionId) {
@@ -378,6 +450,11 @@ async function loadSessions() {
                 } else {
                     actionButton = `<button class="btn btn-small btn-secondary" onclick="resumeSession('${sessionId}')">View</button>`;
                 }
+            } else if (status === 'completed') {
+                actionButton = `
+                    <button class="btn btn-small btn-secondary" onclick="viewSession('${sessionId}')" style="margin-right: 4px;">View</button>
+                    <button class="btn btn-small btn-primary" onclick="downloadPdfFromSession('${sessionId}')">PDF</button>
+                `;
             } else {
                 actionButton = `<button class="btn btn-small btn-secondary" onclick="viewSession('${sessionId}')">View</button>`;
             }
@@ -476,6 +553,44 @@ window.viewSession = async function(sessionId) {
     } catch (error) {
         console.error('Error viewing session:', error);
         alert('Error loading session data');
+    }
+};
+
+// Download PDF from a session (global function for onclick)
+window.downloadPdfFromSession = async function(sessionId) {
+    try {
+        // Use the GET endpoint for direct download
+        const response = await fetch(`${API_BASE_URL}/api/download-pdf/${sessionId}`);
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to generate PDF');
+        }
+        
+        // Get PDF blob
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        
+        // Get filename from Content-Disposition header or use default
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = `pipeline_report_${sessionId.substring(0, 8)}.pdf`;
+        if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+            if (filenameMatch) {
+                filename = filenameMatch[1];
+            }
+        }
+        
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Error downloading PDF:', error);
+        alert(`Error generating PDF: ${error.message}`);
     }
 };
 

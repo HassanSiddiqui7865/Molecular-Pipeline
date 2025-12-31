@@ -73,3 +73,42 @@ Copy this JSON to replace content in input.json:
   "systemic": true
 }
 
+
+
+{
+  "pathogens": [
+    {
+      "pathogen_name": "BVAB 2",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Candida albicans",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Gardnerella vaginalis",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Megasphaera 1",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Atopobium vaginae",
+      "pathogen_count": "1x10^3"
+    }
+  ],
+  "resistant_genes": [],
+  "severity_codes": [
+    "R30.9"
+  ],
+  "age": 32,
+  "sample": "Women Health",
+  "systemic": false,
+  "gender": "Female",
+  "allergies": [
+    "Amoxicillin",
+    "Penicillin"
+  ]
+}
+

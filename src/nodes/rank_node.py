@@ -15,7 +15,8 @@ from prompts import ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE
 from utils import (
     format_resistance_genes, get_icd_names_from_state,
     get_pathogens_from_input, format_pathogens,
-    get_resistance_genes_from_input, create_llm
+    get_resistance_genes_from_input, create_llm, normalize_antibiotic_name,
+    retry_with_max_attempts, RetryError
 )
 
 logger = logging.getLogger(__name__)
@@ -125,78 +126,63 @@ CRITICAL: For severe/life-threatening allergies, filter all cross-reactive antib
         allergy_evaluation=allergy_evaluation
     )
     
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            program = LLMTextCompletionProgram.from_defaults(
-                output_cls=FilteredAntibioticsResult,
-                llm=llm,
-                prompt_template_str="{input_str}",
-                verbose=False
-            )
-            
-            result = program(input_str=prompt)
-            
-            if not result:
-                logger.warning(f"Empty filtering result (attempt {attempt}), retrying...")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-            
-            result_dict = result.model_dump()
-            filtered_antibiotics = result_dict.get('filtered_antibiotics', [])
-            
-            # Build set of antibiotics to keep and list of filtered out ones
-            antibiotics_to_keep = set()
-            filtered_out = []
-            
-            for entry in filtered_antibiotics:
-                medical_name = entry.get('medical_name', '').strip()
-                should_keep = entry.get('should_keep', True)
-                filtering_reason = entry.get('filtering_reason')
-                
-                if should_keep:
-                    antibiotics_to_keep.add(medical_name)
-                else:
-                    filtered_out.append({
-                        'medical_name': medical_name,
-                        'filtering_reason': filtering_reason or 'No reason provided'
-                    })
-                    logger.info(f"Filtered out: {medical_name} - {filtering_reason}")
-            
-            logger.info(
-                f"Antibiotic filtering: {len(antibiotics_to_keep)} kept, "
-                f"{len(filtered_out)} filtered out from {len(unique_antibiotics)} total"
-            )
-            
-            return {
-                'antibiotics_to_keep': antibiotics_to_keep,
-                'filtered_out': filtered_out
-            }
-            
-        except Exception as e:
-            logger.warning(f"Error in antibiotic filtering (attempt {attempt}): {e}")
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-
-
-def _normalize_antibiotic_name(name: str) -> str:
-    """
-    Normalize antibiotic name for comparison (case-insensitive, handle hyphens/dashes).
+    def _perform_filtering():
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=FilteredAntibioticsResult,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        return result_dict
     
-    Args:
-        name: Antibiotic name to normalize
+    try:
+        result_dict = retry_with_max_attempts(
+            operation=_perform_filtering,
+            operation_name="LLM antibiotic filtering",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
         
-    Returns:
-        Normalized name for comparison
-    """
-    if not name:
-        return ""
-    # Convert to lowercase, replace different dash types with standard hyphen
-    normalized = name.lower().strip()
-    normalized = normalized.replace('–', '-').replace('—', '-').replace('−', '-')
-    return normalized
+        filtered_antibiotics = result_dict.get('filtered_antibiotics', [])
+        
+        # Build set of antibiotics to keep and list of filtered out ones
+        antibiotics_to_keep = set()
+        filtered_out = []
+        
+        for entry in filtered_antibiotics:
+            medical_name = entry.get('medical_name', '').strip()
+            should_keep = entry.get('should_keep', True)
+            filtering_reason = entry.get('filtering_reason')
+            
+            if should_keep:
+                antibiotics_to_keep.add(medical_name)
+            else:
+                filtered_out.append({
+                    'medical_name': medical_name,
+                    'filtering_reason': filtering_reason or 'No reason provided'
+                })
+                logger.info(f"Filtered out: {medical_name} - {filtering_reason}")
+        
+        logger.info(
+            f"Antibiotic filtering: {len(antibiotics_to_keep)} kept, "
+            f"{len(filtered_out)} filtered out from {len(unique_antibiotics)} total"
+        )
+        
+        return {
+            'antibiotics_to_keep': antibiotics_to_keep,
+            'filtered_out': filtered_out
+        }
+        
+    except RetryError as e:
+        logger.error(f"Antibiotic filtering failed after max attempts: {e}")
+        raise
+
+
 
 
 def _calculate_rank_score(
@@ -405,7 +391,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         if isinstance(ab_entry, dict):
                             medical_name = ab_entry.get('medical_name', '').strip()
                             if medical_name:
-                                normalized_name = _normalize_antibiotic_name(medical_name)
+                                normalized_name = normalize_antibiotic_name(medical_name)
                                 antibiotic_groups[normalized_name][category] += 1
                                 antibiotic_groups[normalized_name]['original_names'].add(medical_name)
                                 antibiotic_original_categories[normalized_name][category] += 1
@@ -450,7 +436,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             for ab_entry in all_antibiotics:
                 medical_name = ab_entry.get('medical_name', '').strip()
                 if medical_name:
-                    normalized_name = _normalize_antibiotic_name(medical_name)
+                    normalized_name = normalize_antibiotic_name(medical_name)
                     final_category = final_categories.get(normalized_name, 'not_known')
                     reorganized_plan[final_category].append(ab_entry)
             
@@ -557,7 +543,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         if isinstance(ab_entry, dict):
                             medical_name = ab_entry.get('medical_name', '').strip()
                             if medical_name:
-                                normalized_name = _normalize_antibiotic_name(medical_name)
+                                normalized_name = normalize_antibiotic_name(medical_name)
                                 category_antibiotics[category].add(normalized_name)
                                 filtered_final_categories[normalized_name] = category
         
@@ -633,9 +619,19 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'filtered_out_antibiotics': filtered_out_antibiotics  # Antibiotics filtered out with reasons
         }
         
+    except RetryError as e:
+        error_msg = f"Rank node failed: {e.operation_name} - {str(e)}"
+        logger.error(error_msg)
+        # Record error in state and stop pipeline
+        errors = state.get('errors', [])
+        errors.append(error_msg)
+        raise Exception(error_msg) from e
     except Exception as e:
         logger.error(f"Error in rank_node: {e}", exc_info=True)
-        return {'source_results': state.get('source_results', [])}
+        # Record error in state
+        errors = state.get('errors', [])
+        errors.append(f"Rank node error: {str(e)}")
+        return {'source_results': state.get('source_results', []), 'errors': errors}
 
 
 def _save_rank_results(

@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from fastapi import FastAPI, Request, Body
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from io import BytesIO
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -405,9 +406,9 @@ async def get_session_data(session_id: str):
 @app.get('/api/progress/{session_id}')
 async def progress_stream(session_id: str):
     """SSE endpoint for progress updates."""
-    global current_execution
     
     async def generate():
+        global current_execution
         # If session not in memory queues, check database and create queue if needed
         if session_id not in progress_queues:
             session = get_session(session_id)
@@ -447,9 +448,12 @@ async def progress_stream(session_id: str):
                     if session_id in progress_queues:
                         del progress_queues[session_id]
                     # Release execution lock
-                    with execution_lock:
-                        if current_execution == session_id:
-                            current_execution = None
+                    try:
+                        with execution_lock:
+                            if current_execution == session_id:
+                                current_execution = None
+                    except Exception as lock_error:
+                        logger.warning(f"Error releasing execution lock: {lock_error}")
                     break
                 else:
                     # Progress update
@@ -469,6 +473,115 @@ async def progress_stream(session_id: str):
             'X-Accel-Buffering': 'no'
         }
     )
+
+
+@app.post('/api/download-pdf')
+async def download_pdf_api(request: Request):
+    """Generate and download PDF from JSON data or session_id."""
+    try:
+        data = await request.json()
+        session_id = data.get('session_id')
+        json_data = data.get('data')
+        
+        # If session_id provided, fetch from database
+        if session_id:
+            session = get_session(session_id)
+            if not session:
+                return JSONResponse(
+                    status_code=404,
+                    content={'error': 'Session not found'}
+                )
+            
+            # Get result from session
+            result_data = session.get('result')
+            if not result_data:
+                return JSONResponse(
+                    status_code=400,
+                    content={'error': 'No result data found for this session'}
+                )
+            
+            # Use the stored result data
+            pdf_data = result_data
+        elif json_data:
+            # Use provided JSON data
+            pdf_data = json_data
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'Either session_id or data must be provided'}
+            )
+        
+        # Import export function
+        from export_pdf import export_to_pdf
+        
+        # Generate PDF (optionally saves to disk based on config)
+        pdf_name, pdf_buffer = export_to_pdf(pdf_data, save_to_disk=None)
+        
+        # Create a temporary file-like object for response
+        pdf_buffer.seek(0)
+        
+        # Return PDF file for download in browser
+        return StreamingResponse(
+            BytesIO(pdf_buffer.read()),
+            media_type='application/pdf',
+            headers={
+                'Content-Disposition': f'attachment; filename="{Path(pdf_name).name}"'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={'error': f'Error generating PDF: {str(e)}'}
+        )
+
+
+@app.get('/api/download-pdf/{session_id}')
+async def download_pdf_by_session(session_id: str):
+    """Generate and download PDF from session_id (GET endpoint for direct links)."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            return JSONResponse(
+                status_code=404,
+                content={'error': 'Session not found'}
+            )
+        
+        # Get result from session
+        result_data = session.get('result')
+        if not result_data:
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'No result data found for this session'}
+            )
+        
+        # Import export function
+        from export_pdf import export_to_pdf
+        from config import get_output_config
+        from io import BytesIO
+        
+        # Generate PDF (optionally saves to disk based on config)
+        pdf_name, pdf_buffer = export_to_pdf(result_data, save_to_disk=None)
+        
+        # Create a temporary file-like object for response
+        pdf_buffer.seek(0)
+        
+        # Return PDF file for download in browser
+        return StreamingResponse(
+            BytesIO(pdf_buffer.read()),
+            media_type='application/pdf',
+            headers={
+                'Content-Disposition': f'attachment; filename="{Path(pdf_name).name}"'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={'error': f'Error generating PDF: {str(e)}'}
+        )
 
 
 if __name__ == '__main__':

@@ -3,8 +3,7 @@ Utility functions for the Molecular Pipeline.
 """
 import logging
 import time
-from typing import Optional, List, Dict, Any, TypeVar, Callable, Type
-from pydantic import BaseModel
+from typing import Optional, List, Dict, Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +17,6 @@ except ImportError:
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
     Ollama = None
-
-T = TypeVar('T', bound=BaseModel)
 
 
 def fix_text_encoding(text: Optional[str]) -> str:
@@ -352,6 +349,108 @@ def create_llm() -> Optional[Ollama]:
         return None
 
 
+def normalize_antibiotic_name(name: str) -> str:
+    """
+    Normalize antibiotic name for comparison (case-insensitive, handle hyphens/dashes).
+    
+    Args:
+        name: Antibiotic name to normalize
+        
+    Returns:
+        Normalized name for comparison
+    """
+    if not name:
+        return ""
+    # Convert to lowercase, replace different dash types with standard hyphen
+    normalized = name.lower().strip()
+    normalized = normalized.replace('–', '-').replace('—', '-').replace('−', '-')
+    return normalized
+
+
+class RetryError(Exception):
+    """Exception raised when retry logic exhausts all attempts."""
+    def __init__(self, message: str, operation_name: str, attempts: int, last_error: Exception):
+        super().__init__(message)
+        self.operation_name = operation_name
+        self.attempts = attempts
+        self.last_error = last_error
+
+
+def retry_with_max_attempts(
+    operation: Callable,
+    operation_name: str = "Operation",
+    max_attempts: int = 5,
+    retry_delay: float = 2.0,
+    empty_result_handler: Optional[Callable] = None,
+    should_retry_on_empty: bool = True
+) -> Any:
+    """
+    Common retry logic for LLM calls and scraping operations.
+    Retries up to max_attempts times, then raises RetryError to stop pipeline.
+    
+    Args:
+        operation: Callable that performs the operation (should return result or None/empty)
+        operation_name: Name of operation for logging (e.g., "LLM extraction", "Scraping")
+        max_attempts: Maximum number of attempts (default: 5)
+        retry_delay: Base delay between retries in seconds (default: 2.0)
+        empty_result_handler: Optional function to call if result is empty (can return fallback)
+        should_retry_on_empty: Whether to retry if result is empty/None (default: True)
+        
+    Returns:
+        Result from operation
+        
+    Raises:
+        RetryError: If all attempts are exhausted
+    """
+    last_error = None
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = operation()
+            
+            # Check if result is empty/None
+            if result is None or (hasattr(result, '__len__') and len(result) == 0):
+                if empty_result_handler:
+                    fallback = empty_result_handler()
+                    if fallback is not None:
+                        logger.info(f"{operation_name}: Using fallback result after empty response (attempt {attempt})")
+                        return fallback
+                
+                if should_retry_on_empty and attempt < max_attempts:
+                    logger.warning(f"{operation_name}: Empty result (attempt {attempt}/{max_attempts}), retrying...")
+                    time.sleep(retry_delay * attempt)  # Exponential backoff
+                    continue
+                elif should_retry_on_empty:
+                    # Last attempt with empty result
+                    error_msg = f"{operation_name}: Empty result after {max_attempts} attempts"
+                    logger.error(error_msg)
+                    raise RetryError(error_msg, operation_name, max_attempts, Exception("Empty result"))
+            
+            # Success - return result
+            if attempt > 1:
+                logger.info(f"{operation_name}: Succeeded on attempt {attempt}")
+            return result
+            
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts:
+                logger.warning(f"{operation_name}: Error on attempt {attempt}/{max_attempts}: {e}, retrying...")
+                time.sleep(retry_delay * attempt)  # Exponential backoff
+            else:
+                # Last attempt failed
+                error_msg = f"{operation_name}: Failed after {max_attempts} attempts: {str(e)}"
+                logger.error(error_msg)
+                raise RetryError(error_msg, operation_name, max_attempts, e) from e
+    
+    # Should never reach here, but just in case
+    raise RetryError(
+        f"{operation_name}: Failed after {max_attempts} attempts",
+        operation_name,
+        max_attempts,
+        last_error or Exception("Unknown error")
+    )
+
+
 def clean_null_strings(data: Any) -> Any:
     """
     Recursively convert string 'null' values to actual None/null.
@@ -373,65 +472,3 @@ def clean_null_strings(data: Any) -> Any:
         return data
 
 
-def call_llm_with_retry(
-    output_cls: Type[T],
-    prompt: str,
-    llm: Optional[Ollama],
-    retry_delay: float = 2.0,
-    max_attempts: Optional[int] = None,
-    operation_name: str = "LLM operation",
-    empty_result_handler: Optional[Callable[[], Optional[T]]] = None
-) -> Optional[T]:
-    """
-    Call LLM with structured output and infinite retry logic.
-    Shared utility function for all LLM calls across nodes.
-    
-    Args:
-        output_cls: Pydantic model class for structured output
-        prompt: Prompt string to send to LLM
-        llm: Ollama LLM instance (can be None)
-        retry_delay: Delay between retries in seconds
-        max_attempts: Maximum number of attempts (None = infinite)
-        operation_name: Name of operation for logging
-        empty_result_handler: Optional function to call if result is empty
-        
-    Returns:
-        Parsed result as output_cls instance, or None if max_attempts reached
-    """
-    if not LLAMAINDEX_AVAILABLE or not llm:
-        logger.warning(f"{operation_name}: LLM not available")
-        return None
-    
-    attempt = 0
-    while True:
-        attempt += 1
-        if max_attempts and attempt > max_attempts:
-            logger.error(f"{operation_name}: Max attempts ({max_attempts}) reached, giving up")
-            return None
-        
-        try:
-            program = LLMTextCompletionProgram.from_defaults(
-                output_cls=output_cls,
-                llm=llm,
-                prompt_template_str="{input_str}",
-                verbose=False
-            )
-            
-            result = program(input_str=prompt)
-            
-            if not result:
-                logger.warning(f"{operation_name}: Empty result (attempt {attempt}), retrying...")
-                if empty_result_handler:
-                    fallback = empty_result_handler()
-                    if fallback is not None:
-                        return fallback
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-            
-            return result
-            
-        except Exception as e:
-            logger.warning(f"{operation_name}: Error (attempt {attempt}): {e}")
-            logger.info(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)

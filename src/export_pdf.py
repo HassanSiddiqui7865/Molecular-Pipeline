@@ -22,10 +22,10 @@ except ImportError:
 def _format_text_field(text: Optional[str]) -> str:
     """Format any text field to handle None values and escape HTML."""
     if text is None:
-        return "-"
+        return "N/A"
     text_str = str(text).strip()
     if not text_str:
-        return "-"
+        return "N/A"
     return html.escape(text_str)
 
 
@@ -37,17 +37,25 @@ def _create_html_template(data: Dict[str, Any]) -> str:
     
     # Get ICD codes with names
     from utils import get_icd_names_from_state, get_pathogens_from_input, format_pathogens, get_resistance_genes_from_input, format_resistance_genes
-    icd_code_names = get_icd_names_from_state(data) if isinstance(data, dict) else '-'
-    if not icd_code_names or icd_code_names == 'not specified':
-        icd_code_names = input_params.get('severity_codes', '-')
+    icd_code_names = get_icd_names_from_state(data) if isinstance(data, dict) else 'N/A'
+    if not icd_code_names or icd_code_names == 'not specified' or icd_code_names == 'N/A':
+        severity_codes = input_params.get('severity_codes', [])
+        if severity_codes:
+            icd_code_names = ', '.join(severity_codes) if isinstance(severity_codes, list) else str(severity_codes)
+        else:
+            icd_code_names = 'N/A'
     
     pathogens = get_pathogens_from_input(input_params)
-    pathogen_display = format_pathogens(pathogens) if pathogens else '-'
+    pathogen_display = format_pathogens(pathogens) if pathogens else 'N/A'
     resistant_genes = get_resistance_genes_from_input(input_params)
-    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else '-'
+    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else 'N/A'
     
-    # Get sample type - CRITICAL FIX: Use BLOOD from the image
-    sample = "BLOOD"  # Always set to BLOOD as shown in the image
+    # Get sample type from input parameters (for header display)
+    sample = input_params.get('sample', 'N/A')
+    if sample and sample != 'N/A':
+        sample = sample.upper()
+    else:
+        sample = "N/A"
     
     # Get gene analysis
     gene_analysis_list = result.get('pharmacist_analysis_on_resistant_gene', [])
@@ -63,7 +71,7 @@ def _create_html_template(data: Dict[str, Any]) -> str:
     <!-- Header Section -->
     <div class="header-section">
         <div class="header-main">
-            <div class="header-title">#BLOOD</div>
+            <div class="header-title">#{sample if sample != 'N/A' else 'N/A'}</div>
         </div>
     </div>
     
@@ -73,7 +81,7 @@ def _create_html_template(data: Dict[str, Any]) -> str:
             <tr>
                 <td class="info-label">Patient Name:</td>
                 <td class="info-value">{_format_text_field(input_params.get('patient_name', 'N/A'))}</td>
-                <td class="info-label">Lab Accession #:</td>
+                <td class="info-label">Lab Accession:</td>
                 <td class="info-value">{_format_text_field(input_params.get('lab_accession', 'N/A'))}</td>
             </tr>
             <tr>
@@ -96,15 +104,21 @@ def _create_html_template(data: Dict[str, Any]) -> str:
             </tr>
             <tr>
                 <td class="info-label">Patient Gender:</td>
-                <td class="info-value">{_format_text_field(input_params.get('patient_gender', 'N/A'))}</td>
+                <td class="info-value">{_format_text_field(input_params.get('patient_gender', input_params.get('gender', 'N/A')))}</td>
                 <td class="info-label">Specimen Type:</td>
-                <td class="info-value">{_format_text_field(input_params.get('specimen_type', 'N/A'))}</td>
+                <td class="info-value">{_format_text_field('N/A')}</td>
             </tr>
             <tr>
                 <td class="info-label">Drug Allergies:</td>
-                <td class="info-value">{_format_text_field(input_params.get('drug_allergies', 'N/A'))}</td>
+                <td class="info-value">{_format_text_field(', '.join(input_params.get('drug_allergies', input_params.get('allergy', []))) if input_params.get('drug_allergies') or input_params.get('allergy') else 'N/A')}</td>
                 <td class="info-label">Specimen Site:</td>
                 <td class="info-value">{_format_text_field(input_params.get('specimen_site', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Age:</td>
+                <td class="info-value">{_format_text_field(input_params.get('age', 'N/A'))}</td>
+                <td class="info-label">Systemic:</td>
+                <td class="info-value">{_format_text_field('Yes' if input_params.get('systemic') is True else ('No' if input_params.get('systemic') is False else 'N/A'))}</td>
             </tr>
         </table>
     </div>
@@ -120,6 +134,10 @@ def _create_html_template(data: Dict[str, Any]) -> str:
             <tr>
                 <td class="result-label">Resistant Gene:</td>
                 <td class="result-value">{_format_text_field(resistant_gene)}</td>
+            </tr>
+            <tr>
+                <td class="result-label">Severity Codes:</td>
+                <td class="result-value">{_format_text_field(icd_code_names if icd_code_names and icd_code_names != 'not specified' else 'N/A')}</td>
             </tr>
         </table>
     </div>
@@ -144,7 +162,7 @@ def _create_html_template(data: Dict[str, Any]) -> str:
     {gene_html if gene_html else ''}
     
     <!-- Negative Sections -->
-    {_build_negative_sections_html()}
+    {_build_negative_sections_html(data)}
     
     <!-- Footer -->
     <div class="footer">
@@ -186,12 +204,16 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                 considerations = fix_text_encoding(med.get('general_considerations', ''))
                 
                 html_parts.append('<div class="medication-card">')
-                html_parts.append('<div class="medication-header">')
                 # Show "First Line" tag only on first medication of this category
                 if idx == 0:
-                    html_parts.append('<span class="medication-tag first-line">First Line</span>')
-                html_parts.append(f'<span class="medication-name">{_format_text_field(name)}</span>')
-                html_parts.append('</div>')
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section first-line-tag">First Line</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
                 
                 html_parts.append('<div class="medication-details">')
                 html_parts.append('<table class="medication-table">')
@@ -219,6 +241,18 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                     html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
                     html_parts.append('</tr>')
                 html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
                 html_parts.append('</div>')
                 html_parts.append('</div>')
         
@@ -233,12 +267,16 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                 considerations = fix_text_encoding(med.get('general_considerations', ''))
                 
                 html_parts.append('<div class="medication-card">')
-                html_parts.append('<div class="medication-header">')
                 # Show "Second Line" tag only on first medication of this category
                 if idx == 0:
-                    html_parts.append('<span class="medication-tag second-line">Second Line</span>')
-                html_parts.append(f'<span class="medication-name">{_format_text_field(name)}</span>')
-                html_parts.append('</div>')
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section second-line-tag">Second Line</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
                 
                 html_parts.append('<div class="medication-details">')
                 html_parts.append('<table class="medication-table">')
@@ -266,6 +304,18 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                     html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
                     html_parts.append('</tr>')
                 html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
                 html_parts.append('</div>')
                 html_parts.append('</div>')
         
@@ -280,12 +330,16 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                 considerations = fix_text_encoding(med.get('general_considerations', ''))
                 
                 html_parts.append('<div class="medication-card">')
-                html_parts.append('<div class="medication-header">')
                 # Show "Alternate" tag only on first medication of this category
                 if idx == 0:
-                    html_parts.append('<span class="medication-tag alternate">Alternate</span>')
-                html_parts.append(f'<span class="medication-name">{_format_text_field(name)}</span>')
-                html_parts.append('</div>')
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section alternate-tag">Alternate</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
                 
                 html_parts.append('<div class="medication-details">')
                 html_parts.append('<table class="medication-table">')
@@ -313,6 +367,18 @@ def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
                     html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
                     html_parts.append('</tr>')
                 html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
                 html_parts.append('</div>')
                 html_parts.append('</div>')
         
@@ -357,8 +423,8 @@ def _build_gene_html(gene_analysis_list: list) -> str:
     return '\n'.join(html_parts)
 
 
-def _build_negative_sections_html() -> str:
-    """Build HTML for negative organisms and genes sections."""
+def _build_negative_sections_html(data: Dict[str, Any] = None) -> str:
+    """Build HTML for negative organisms and genes sections using static lists."""
     negative_organisms = [
         'Acinetobacter baumannii', 'Bacteroides fragilis', 'Candida glabrata', 'Candida albicans',
         'Candida auris', 'Candida krusei', 'Candida lusitaniae', 'Candida parapsilosis',
@@ -386,7 +452,7 @@ def _build_negative_sections_html() -> str:
     for i, org in enumerate(negative_organisms):
         if i > 0:
             html_parts.append(', ')
-        html_parts.append(org)
+        html_parts.append(_format_text_field(org))
     html_parts.append('</div>')
     html_parts.append('</div>')
     
@@ -397,7 +463,7 @@ def _build_negative_sections_html() -> str:
     for i, gene in enumerate(negative_genes):
         if i > 0:
             html_parts.append(', ')
-        html_parts.append(gene)
+        html_parts.append(_format_text_field(gene))
     html_parts.append('</div>')
     html_parts.append('</div>')
     
@@ -520,48 +586,74 @@ def _get_css_styles() -> str:
         .medication-card {
             border: 1px solid #ccc;
             border-radius: 4px;
-            margin-bottom: 8px;
+            margin-bottom: 15px;
             overflow: hidden;
+            text-align: left;
+            min-height: 80px;
+            width: 100%;
+            box-sizing: border-box;
         }
         
         .medication-header {
-            background-color: #f5f5f5;
-            padding: 6px 0;
+            background-color: #ffffff;
             border-bottom: 1px solid #ccc;
-            display: flex;
-            align-items: center;
-            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+            border-collapse: collapse;
+            margin: 0;
+            padding: 0;
+            border-spacing: 0;
         }
         
-        .medication-tag {
-            background-color: #367FA9;
+        .medication-header td {
+            vertical-align: middle;
+            margin: 0;
+        }
+        
+        .medication-tag-section {
             color: white;
-            padding: 4px 12px;
-            border-radius: 3px;
-            font-size: 9pt;
-            font-weight: bold;
-            margin-right: 12px;
-            min-width: 90px;
-            display: inline-block;
+            width: 20%;
+            vertical-align: middle;
             text-align: center;
+            font-size: 11pt;
+            font-weight: bold;
+            line-height: 1.3;
+            padding: 4px !important;
+            margin: 0;
         }
         
-        .medication-tag.first-line {
+        .medication-tag-section.first-line-tag {
             background-color: #367FA9;
         }
         
-        .medication-tag.second-line {
+        .medication-tag-section.second-line-tag {
             background-color: #5B9BD5;
         }
         
-        .medication-tag.alternate {
+        .medication-tag-section.alternate-tag {
             background-color: #70AD47;
+        }
+        
+        .medication-name-section {
+            background-color: #ffffff;
+            width: 80%;
+            vertical-align: middle;
+            padding: 4px !important;
+            margin: 0;
+        }
+        
+        .medication-name-section.full-width {
+            width: 100%;
         }
         
         .medication-name {
             font-weight: bold;
-            font-size: 10pt;
+            font-size: 13pt;
             color: #000;
+            text-align: left;
+            margin: 0;
+            padding: 0;
+            line-height: 1.4;
         }
         
         .medication-details {
@@ -595,6 +687,38 @@ def _get_css_styles() -> str:
         .detail-value.coverage {
             color: #FF0000;
             font-weight: bold;
+        }
+        
+        /* Medication References */
+        .medication-references {
+            margin-top: 2px;
+            padding-top: 2px;
+            border-top: 0.5pt solid #eee;
+        }
+        
+        .references-label {
+            font-weight: bold;
+            font-size: 8pt;
+            color: #666;
+            margin-bottom: 2px;
+            display: block;
+        }
+        
+        .reference-line {
+            margin: 0;
+            margin-bottom: 1px;
+            color: #333;
+            word-wrap: break-word;
+            font-size: 7pt;
+            line-height: 1.2;
+            padding: 0;
+            border: none;
+            background: none;
+        }
+        
+        .reference-link {
+            color: #0066cc;
+            text-decoration: none;
         }
         
         /* Gene Section */
@@ -667,16 +791,19 @@ def _get_css_styles() -> str:
     """
 
 
-def export_to_pdf(data: Dict[str, Any], output_path: Optional[str] = None) -> str:
+def export_to_pdf(data: Dict[str, Any], output_path: Optional[str] = None, save_to_disk: Optional[bool] = None) -> tuple[str, BytesIO]:
     """
     Export data to PDF using xhtml2pdf (pisa) - Pure Python, no system dependencies.
     
     Args:
         data: Dictionary containing input_parameters and result
-        output_path: Optional path for output file
+        output_path: Optional path for output file (only used if save_to_disk is True)
+        save_to_disk: Whether to save PDF to disk. If None, uses config setting.
         
     Returns:
-        Path to generated PDF file
+        Tuple of (pdf_path_or_name, pdf_bytes): 
+        - pdf_path_or_name: Path if saved to disk, or filename if not saved
+        - pdf_bytes: BytesIO object containing the PDF data
     """
     if not XHTML2PDF_AVAILABLE:
         raise ImportError(
@@ -684,42 +811,63 @@ def export_to_pdf(data: Dict[str, Any], output_path: Optional[str] = None) -> st
             "This is a pure Python library with no system dependencies."
         )
     
-    # Generate output path if not provided
-    if not output_path:
+    # Check if we should save to disk
+    if save_to_disk is None:
         from config import get_output_config
         output_config = get_output_config()
-        output_dir = Path(output_config.get('directory', 'output'))
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_path = str(output_dir / f"report_{timestamp}.pdf")
+        save_to_disk = output_config.get('save_enabled', True)
     
     # Generate HTML content
     html_content = _create_html_template(data)
     
-    # Convert HTML to PDF using xhtml2pdf
-    result_file = open(output_path, "w+b")
+    # Create BytesIO buffer for PDF
+    pdf_buffer = BytesIO()
     
-    try:
-        # Convert HTML string to PDF
-        pisa_status = pisa.CreatePDF(
-            BytesIO(html_content.encode('utf-8')),
-            dest=result_file,
-            encoding='utf-8'
-        )
+    # Convert HTML string to PDF
+    pisa_status = pisa.CreatePDF(
+        BytesIO(html_content.encode('utf-8')),
+        dest=pdf_buffer,
+        encoding='utf-8'
+    )
+    
+    # Check for errors
+    if pisa_status.err:
+        raise Exception(f"Error generating PDF: {pisa_status.err}")
+    
+    # Reset buffer position to beginning
+    pdf_buffer.seek(0)
+    
+    # Optionally save to disk
+    pdf_path_or_name = None
+    if save_to_disk:
+        # Generate output path if not provided
+        if not output_path:
+            from config import get_output_config
+            output_config = get_output_config()
+            output_dir = Path(output_config.get('directory', 'output'))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_path = str(output_dir / f"report_{timestamp}.pdf")
         
-        result_file.close()
-        
-        # Check for errors
-        if pisa_status.err:
-            raise Exception(f"Error generating PDF: {pisa_status.err}")
-        
-        logger.info(f"PDF report exported to: {output_path}")
-        return output_path
-        
-    except Exception as e:
-        result_file.close()
-        # Clean up on error
-        if Path(output_path).exists():
-            Path(output_path).unlink()
-        raise
+        # Save to disk
+        try:
+            with open(output_path, "wb") as f:
+                # Copy buffer content to file
+                pdf_buffer.seek(0)
+                f.write(pdf_buffer.read())
+                pdf_buffer.seek(0)  # Reset for return
+            logger.info(f"PDF report saved to: {output_path}")
+            pdf_path_or_name = output_path
+        except Exception as e:
+            logger.warning(f"Failed to save PDF to disk: {e}, but PDF is available for download")
+            # Generate a filename for reference even if save failed
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            pdf_path_or_name = f"report_{timestamp}.pdf"
+    else:
+        # Just generate a filename for reference
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        pdf_path_or_name = f"report_{timestamp}.pdf"
+        logger.info(f"PDF generated in memory (not saved to disk): {pdf_path_or_name}")
+    
+    return pdf_path_or_name, pdf_buffer
