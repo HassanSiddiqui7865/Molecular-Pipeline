@@ -6,43 +6,42 @@ from typing import List, Optional, Dict
 
 EXTRACTION_PROMPT_TEMPLATE = """Extract antibiotic therapy recommendations from medical content.
 
-CONTEXT: Pathogen: {pathogen_display}{resistance_context} | Severity: {severity_codes} | Age: {age}, Sample: {sample}, Systemic: {systemic}
+CONTEXT: Pathogen: {pathogen_display}{resistance_context}{allergy_context} | Severity: {severity_codes} | Age: {age}, Sample: {sample}, Systemic: {systemic}
 
 SOURCE: {content}
 
-NOTE: The source content may contain unformatted guidelines, research papers, or medical literature with markdown formatting, citation markers (e.g., **(A-III)**, [1, 2]), reference numbers, table structures, incomplete sentences, and mixed formatting. Parse through this content carefully to extract relevant antibiotic information, ignoring formatting artifacts and focusing on the actual medical recommendations and dosing information.
+PARSING INSTRUCTIONS: The source content may contain unformatted guidelines, research papers, or medical literature with markdown formatting, citation markers (e.g., **(A-III)**, [1, 2]), reference numbers, table structures, incomplete sentences, and mixed formatting. Parse through this content carefully to extract relevant antibiotic information, ignoring formatting artifacts and focusing on the actual medical recommendations and dosing information.
 
-CRITICAL: Extract STRICTLY based on the input context above. Do NOT extract antibiotics or information for other pathogens, conditions, or patient scenarios.
+CRITICAL CONSTRAINT: Extract STRICTLY based on the input context above. Do NOT extract antibiotics or information for other pathogens, conditions, or patient scenarios.
 
 TASK: Extract ONLY antibiotics effective against {pathogen_display}{resistance_task} matching the provided context. Extract ALL available information - do not leave fields null if data exists.
 
 FIELDS:
 
-medical_name: Title Case drug name only. Combinations: convert "Drug1/Drug2", "Drug1-Drug2", "Drug1 and Drug2" → "Drug1 plus Drug2". Examples: "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole", "Imipenem/cilastatin" → "Imipenem plus Cilastatin".
+medical_name: Title Case drug name only. Combinations: convert "Drug1/Drug2", "Drug1-Drug2", "Drug1 and Drug2" → "Drug1 plus Drug2". Examples: "TMP/SMX" → "Trimethoprim plus Sulfamethoxazole", "Imipenem/cilastatin" → "Imipenem plus Cilastatin". Never extract resistance genes as antibiotics.
 
-category: "first_choice" (first-line/preferred/primary), "second_choice" (alternatives/backup), "alternative_antibiotic" (salvage/last resort), or "not_known" (cannot determine). Use contextual clues (order, emphasis) if not explicit.
+category: "first_choice" (first-line/preferred/primary), "second_choice" (alternatives/backup), "alternative_antibiotic" (salvage/last resort), or "not_known" (cannot determine). Use contextual clues (order, emphasis) if not explicit. Each antibiotic in one category only.
 
 coverage_for: Format "[Pathogen] [condition]". Use ONLY pathogen matching {pathogen_display} from the input context. Condition based on sample type: Blood/systemic → "bacteremia" or "sepsis" (prefer bacteremia), Urine → "UTI" or "urinary tract infection", Sputum/Respiratory → "pneumonia" or "respiratory infection", CSF → "meningitis", Wound → "wound infection", Other → use appropriate condition from source. Example: "Staphylococcus aureus bacteremia" or "Escherichia coli UTI".
 
-route_of_administration: Extract from explicit mentions ("IV", "intravenous", "PO", "oral", "IM") or infer from dosing. Values: "IV", "PO", "IM", or "IV/PO". Use null only if no route info exists.
+route_of_administration: Extract the route of administration from explicit mentions or infer from dosing context. Acceptable values include systemic routes: "IV", "PO", "IM", "IV/PO", "IV/IM", "PO/IM", and non-systemic routes: "Vaginal", "Intravaginal", "Topical", "Ophthalmic", "Otic", "Nasal", "Rectal", "Inhalation", "Sublingual", "Buccal", or combinations like "PO/Vaginal", "Topical/Vaginal", "IV/PO", etc. Use the exact route mentioned in the source. For non-systemic conditions (e.g., vaginal infections, skin infections), extract routes like "Vaginal", "Intravaginal", "Topical" as appropriate. Use null only if no route info exists.
 
-dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". CRITICAL: Convert frequencies BEFORE formatting: BID/twice daily → q12h, TID/three times daily → q8h, QD/daily/once daily → q24h. Preserve ranges ("15-20 mg/kg", "7-14 days"). Extract partial info if available: "[dose] [route] [frequency]" if no duration, "[duration]" if only duration. Look for duration phrases: "for X days/weeks", "duration", "treatment/course length". Use null only if NO dosing info exists.
+dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". CRITICAL: Convert frequencies BEFORE formatting: BID/twice daily → q12h, TID/three times daily → q8h, QD/daily/once daily → q24h. Preserve ranges ("15-20 mg/kg", "7-14 days"). CRITICAL: Preserve percentage concentrations and formulations when present in source (e.g., "0.75% gel", "2% cream", "1.3% gel") - include them in dose_duration exactly as mentioned. Examples: "0.75% gel 5 g Vaginal q24h for 5 days" (correct - preserves percentage), "2% cream 5 g Vaginal q24h for 7 days" (correct - preserves percentage), "500 mg IV q8h for 7 days" (correct). Extract partial info if available: "[dose] [route] [frequency]" if no duration, "[duration]" if only duration. Look for duration phrases: "for X days/weeks", "duration", "treatment/course length". NEVER include the drug name (medical_name) in dose_duration - only include dose amount (with percentage/formulation if present), route, frequency, and duration. Examples: "500 mg IV q8h for 7 days" (correct), "vancomycin 500 mg IV q8h for 7 days" (WRONG - drug name included). Use null only if NO dosing info exists.
 
-renal_adjustment: "No Renal Adjustment" if explicitly stated. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (use most restrictive if multiple). Look for: "CrCl < X", "creatinine clearance < X", "if/when CrCl < X". Use null if not mentioned. Do not duplicate general_considerations.
+renal_adjustment: Extract ONLY what is explicitly mentioned in the source. For systemic medications (IV, PO, IM): "No Renal Adjustment" if explicitly stated, or "Adjust dose for CrCl < X mL/min" if CrCl threshold mentioned (use most restrictive if multiple). Look for: "CrCl < X", "creatinine clearance < X", "if/when CrCl < X". For non-systemic medications (topical, vaginal, ophthalmic, otic, etc.): Use null if not mentioned in source. DO NOT add "Not Applicable" or "N/A" during extraction - only extract what is explicitly stated in the source. Use null if not mentioned. Do not duplicate general_considerations.
 
 general_considerations: Extract monitoring ("monitor", "watch for"), warnings, toxicity, interactions, contraindications. Separate with semicolons. Exclude dosing, drug class descriptions, efficacy. Use null only if no safety/monitoring info exists.
 
-{resistance_genes_section}CRITICAL RULES:
-1. Formatting: BID→q12h, TID→q8h, QD/daily→q24h. Slashes→"plus" for combinations.
-2. Extraction: Extract aggressively - use all available info. For duplicates, use most complete. Keep ranges intact. Include duration when mentioned anywhere.
+{resistance_genes_section}{allergy_filtering_rule}CRITICAL RULES:
+Formatting: BID→q12h, TID→q8h, QD/daily→q24h. Slashes→"plus" for combinations. Extraction: Extract aggressively - use all available info. For duplicates, use most complete. Keep ranges intact. Include duration when mentioned anywhere.
 {resistance_filtering_rule}
-4. Validation: Each antibiotic in one category. Normalize combinations. Never extract resistance genes as antibiotics.
+Validation: Each antibiotic in one category. Normalize combinations. Never extract resistance genes as antibiotics.
 
-DO NOT EXTRACT: Resistance genes as antibiotics. Ineffective antibiotics (filtered by resistance). Drug classes without specific names. Experimental drugs (unless recommended)."""
+DO NOT EXTRACT: Resistance genes as antibiotics. Ineffective antibiotics (filtered by resistance). Allergenic antibiotics (filtered by allergies). Drug classes without specific names. Experimental drugs (unless recommended)."""
 
 ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE = """Evaluate each antibiotic: KEEP or FILTER OUT based on clinical appropriateness.
 
-CONTEXT: Pathogen(s): {pathogen_display}{resistance_context} | Severity: {severity_codes} | Age: {age} | Sample: {sample} | Systemic: {systemic}
+CONTEXT: Pathogen(s): {pathogen_display}{resistance_context}{allergy_context} | Severity: {severity_codes} | Age: {age} | Sample: {sample} | Systemic: {systemic}
 
 CANDIDATES: {antibiotic_list}
 
@@ -50,45 +49,35 @@ TASK: For each antibiotic, determine should_keep (true/false) and filtering_reas
 
 FILTERING CRITERIA (apply in order):
 
-1. MICROBIOLOGICAL EFFICACY (Primary - Most Important):
-   FILTER OUT if: No activity against ANY pathogen OR all pathogens inherently resistant OR resistance gene confers complete resistance against ALL pathogens.
-   KEEP if: Effective against ≥1 pathogen OR retains activity despite resistance for ANY pathogen OR documented efficacy in similar resistance patterns.
-   CRITICAL: Multi-pathogen rule - effective against ≥1 pathogen = KEEP (even if ineffective against others).
+MICROBIOLOGICAL EFFICACY (Primary - Most Important): FILTER OUT if: No activity against ANY pathogen OR all pathogens inherently resistant OR resistance gene confers complete resistance against ALL pathogens. KEEP if: Effective against ≥1 pathogen OR retains activity despite resistance for ANY pathogen OR documented efficacy in similar resistance patterns. CRITICAL: Multi-pathogen rule - effective against ≥1 pathogen = KEEP (even if ineffective against others).
 
-2. PATIENT SAFETY:
-   FILTER OUT if: Absolute contraindication for age {age} OR FDA black box warning applicable OR life-threatening risk outweighs benefit OR severe unmanageable drug interactions.
-   KEEP if: Acceptable risk-benefit for severity {severity_codes} OR relative contraindications manageable OR standard precautions sufficient OR manageable adverse effects.
+PATIENT SAFETY: FILTER OUT if: Absolute contraindication for age {age} OR FDA black box warning applicable OR life-threatening risk outweighs benefit OR severe unmanageable drug interactions{allergy_filtering_criteria}. KEEP if: Acceptable risk-benefit for severity {severity_codes} OR relative contraindications manageable OR standard precautions sufficient OR manageable adverse effects.
 
-3. CLINICAL APPROPRIATENESS:
-   FILTER OUT if: Inadequate penetration for {sample} (e.g., poor CNS for meningitis) OR severity inappropriate (e.g., topical for sepsis) OR route impossible (e.g., PO-only in unconscious) OR documented poor outcomes (e.g., tigecycline for bacteremia).
-   KEEP if: Adequate penetration OR appropriate potency OR suitable route available OR clinical evidence supports use.
+CLINICAL APPROPRIATENESS: FILTER OUT if: Inadequate penetration for {sample} (e.g., poor CNS for meningitis) OR severity inappropriate (e.g., topical for sepsis) OR route impossible (e.g., PO-only in unconscious) OR documented poor outcomes (e.g., tigecycline for bacteremia). KEEP if: Adequate penetration OR appropriate potency OR suitable route available OR clinical evidence supports use.
 
-4. GUIDELINE ADHERENCE:
-   FILTER OUT if: Explicitly contraindicated (guidelines say "do not use" or "avoid") OR withdrawn/restricted OR strong recommendation AGAINST.
-   KEEP if: Guideline-recommended OR listed as acceptable alternative/second-line/third-line OR not discouraged OR evidence-supported OR guideline-compatible mechanism. CRITICAL: "Not first-line" or "alternative option" does NOT mean contraindicated - these should be KEPT.
+GUIDELINE ADHERENCE: FILTER OUT if: Explicitly contraindicated (guidelines say "do not use" or "avoid") OR withdrawn/restricted OR strong recommendation AGAINST. KEEP if: Guideline-recommended OR listed as acceptable alternative/second-line/third-line OR not discouraged OR evidence-supported OR guideline-compatible mechanism. CRITICAL: "Not first-line" or "alternative option" does NOT mean contraindicated - these should be KEPT.
 
-5. APPROVAL & AVAILABILITY:
-   FILTER OUT if: Investigational only (no FDA/EMA approval) OR not commercially available OR experimental without authorization.
-   KEEP if: FDA/EMA approved (even different indication) OR commercially available OR off-label but evidence-supported.
+APPROVAL & AVAILABILITY: FILTER OUT if: Investigational only (no FDA/EMA approval) OR not commercially available OR experimental without authorization. KEEP if: FDA/EMA approved (even different indication) OR commercially available OR off-label but evidence-supported.
 
 DECISION FRAMEWORK (exact order):
-1. Effective against ≥1 pathogen? YES→continue, NO→filter "Ineffective"
-{resistance_decision_step}3. Absolute safety contraindication? YES→filter, NO→continue
-4. Clearly clinically inappropriate? YES→filter, NO→continue
-5. Explicitly contraindicated in guidelines (says "do not use" or "avoid")? YES→filter, NO→continue. Note: "alternative" or "not first-line" = KEEP.
-6. DEFAULT: KEEP (when uncertain, include)
+Effective against ≥1 pathogen? YES→continue, NO→filter "Ineffective"
+{resistance_decision_step}{allergy_decision_step}Absolute safety contraindication? YES→filter, NO→continue
+Clearly clinically inappropriate? YES→filter, NO→continue
+Explicitly contraindicated in guidelines (says "do not use" or "avoid")? YES→filter, NO→continue. Note: "alternative" or "not first-line" = KEEP.
+DEFAULT: KEEP (when uncertain, include)
 
 MULTI-PATHOGEN RULE: Effective against S. aureus but NOT E. faecalis → KEEP. Effective against E. faecalis but NOT S. aureus → KEEP. Effective against NEITHER → FILTER OUT. Reasoning: "effective against [pathogen] but not [other]" for partial coverage.
 
-{resistance_genes_evaluation}
+{resistance_genes_evaluation}{allergy_evaluation}
 
 FILTERING REASON FORMAT:
-- "Ineffective: No activity against any listed pathogen"
-- "Ineffective: Resistance gene [gene_name] confers resistance against all pathogens"
-- "Ineffective: Inherently inactive against all pathogens ([list])"
-- "Safety: Absolute contraindication - [reason]"
-- "Clinical: Inadequate penetration/inappropriate for {sample}/{severity_codes}"
-- "Guideline: Explicitly contraindicated (do not use) for [indication] per [guideline]"
+"Ineffective: No activity against any listed pathogen"
+"Ineffective: Resistance gene [gene_name] confers resistance against all pathogens"
+"Ineffective: Inherently inactive against all pathogens ([list])"
+"Safety: Patient allergic to [allergy] - contraindicated"
+"Safety: Absolute contraindication - [reason]"
+"Clinical: Inadequate penetration/inappropriate for {sample}/{severity_codes}"
+"Guideline: Explicitly contraindicated (do not use) for [indication] per [guideline]"
 
 DO NOT FILTER based on: Cost/insurance, TDM requirements, minor/manageable side effects, second/third-line status, lack of head-to-head data, dose adjustment needs.
 
@@ -105,29 +94,31 @@ SOURCES: {entries_list}
 
 TASK: Synthesize most accurate/complete info from all sources into ONE unified entry.
 
+SOURCE PRIORITY (use highest priority source available):
+1. GUIDELINE SOURCES (Highest Priority): CDC, WHO, IDSA, clinical practice guidelines, treatment guidelines
+2. PROTOCOL SOURCES: Hospital protocols, treatment protocols
+3. TEXTBOOK/RESEARCH PAPERS: Medical textbooks, research papers
+4. CASE REPORTS/OTHER: Case reports, other sources
+
 UNIFICATION RULES:
 
-1. medical_name: Use only names from entries. Most standard/complete form. If differ, prefer most clinically standard. Title Case. CRITICAL: For combinations, use lowercase "plus" (e.g., "Trimethoprim plus Sulfamethoxazole", NOT "Plus"). Keep "Drug1 plus Drug2" format. Don't change if all agree. Don't invent names.
+medical_name: Use only names from entries. Most standard/complete form. If differ, prefer most clinically standard. Title Case. For combinations, use lowercase "plus" (e.g., "Trimethoprim plus Sulfamethoxazole"). Keep "Drug1 plus Drug2" format. Don't change if all agree. Don't invent names.
 
-2. coverage_for: Use only indications from entries. Most specific pathogen/condition. Priority: specific > general. Format "[Pathogen] [condition]" (single primary). Don't combine multiple. Don't invent.
+coverage_for: Use only indications from entries. If guideline sources exist, use coverage_for from guideline sources first. Most specific pathogen/condition. Priority: specific > general. Format "[Pathogen] [condition]" (single primary). Don't combine multiple. Don't invent.
 
-3. route_of_administration: Use only routes from entries. Combine unique routes: "IV/PO" if both, else "IV"/"PO"/"IM". Priority if conflict: IV > IV/PO > PO > IM. Must be IV/PO/IM/IV/PO. Don't infer from dosing.
+route_of_administration: If the same antibiotic appears with DIFFERENT routes (e.g., "PO" and "Vaginal"), combine ALL unique routes separated by "/" (e.g., "PO/Vaginal"). If all entries have the same route, use that route. If guideline sources exist, prioritize routes from guideline sources. If multiple guidelines mention different routes, combine all guideline routes. For systemic routes, priority if conflict: IV > IV/PO > PO > IM. For non-systemic routes, preserve the exact route mentioned (Vaginal, Intravaginal, Topical, Ophthalmic, Otic, Nasal, Rectal, etc.). Accept any valid route of administration. Don't infer from dosing.
 
-4. dose_duration: CRITICAL - Use ONLY from entries. Don't invent/infer/complete. Select most comprehensive regimen from SINGLE source. Priority: a) Loading+maintenance+duration, b) Dose+freq+duration, c) Dose+freq, d) Duration only, e) Incomplete. Preserve ranges ("15-20 mg/kg"). Include duration if in SAME source as dose/freq. If multiple complete, prefer most specific. Don't combine components across sources. For combination drugs, use total dose if shown as single value, or format as "[dose] [route] [frequency]" if components shown separately. Format if complete: "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]".
+dose_duration: Use ONLY from entries. Don't invent/infer/complete. COMPLETE DOSAGE must include dose, frequency (q8h/q12h/q24h), AND duration. Format complete: "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". CRITICAL: Preserve percentage concentrations and formulations exactly as they appear in source entries (e.g., "0.75% gel", "2% cream", "1.3% gel", "6.5% ointment"). These are part of the dose specification and must be included. Examples: "0.75% gel 5 g Vaginal q24h for 5 days" (correct - preserves percentage), "2% cream 5 g Vaginal q24h for 7 days" (correct - preserves percentage), "500 mg IV q8h for 7 days" (correct). INCOMPLETE DOSAGE: If dosage is missing dose, frequency, or duration, set dose_duration to NULL. Enrichment will extract the missing information later. PRIORITY FOR COMPLETE DOSAGES: If guideline sources exist with complete dosage, use guideline dosage (prefer shorter durations when multiple guideline options exist). If no guideline complete dosage, use protocol complete dosage. If no guideline/protocol complete dosage, use textbook/research complete dosage. If no complete dosage exists in any source, set to NULL. DIFFERENT ROUTES: If the same antibiotic has DIFFERENT routes with DIFFERENT dosages (e.g., "500 mg PO q12h for 7 days" and "0.75% gel 5 g Vaginal q24h for 5 days"), combine them with " or " separator: "500 mg PO q12h for 7 days or 0.75% gel 5 g Vaginal q24h for 5 days". Each dosage must be complete (dose + frequency + duration). Preserve percentage concentrations when present. If any dosage is incomplete, set dose_duration to NULL. SAME ROUTE: If all entries have the same route, prefer guideline sources, then prefer shorter durations when multiple complete options exist (e.g., "7 days" over "14 days", "5 days" over "7 days"). If only incomplete dosages exist, set to NULL. CRITICAL: NEVER include the drug name (medical_name) in dose_duration. If a source entry contains the drug name in dose_duration, remove it. Only include: dose amount (with percentage/formulation if present), route, frequency, and duration. Preserve ranges ("15-20 mg/kg", "4–6 weeks"). Don't combine components across sources. For combination drugs, use total dose if shown as single value.
 
-5. renal_adjustment: Use only from entries. STRICT: Only if specific CrCl threshold stated. "No adjustment needed" → "No Renal Adjustment". Vague warnings → null. Multiple sources: use most restrictive threshold (lowest CrCl). Mix specific+vague → use specific. All say no adjustment → "No Renal Adjustment". All vague/silent → null. Edge cases: "Contraindicated CrCl < X" → "Adjust dose for CrCl < X mL/min" + add to general_considerations. "Reduce 50% if CrCl < X" → "Adjust dose for CrCl < X mL/min". "Avoid in renal" → null (move to general_considerations). Don't invent thresholds.
+renal_adjustment: Extract only from entries. If guideline sources exist, use renal adjustment information from guideline sources first. Use "No Renal Adjustment" if explicitly stated or if all sources indicate no adjustment needed. Use "Adjust dose for CrCl < X mL/min" if specific CrCl threshold is mentioned (use most restrictive threshold if multiple sources, prioritizing guideline thresholds). For non-systemic medications (topical, vaginal, ophthalmic, otic, etc.), if route_of_administration is non-systemic and no renal adjustment is mentioned in any source, use "Not Applicable" or "N/A". For systemic medications, set to null if all sources are vague or silent about renal adjustment (vague warnings should be moved to general_considerations). Don't invent thresholds or adjustments not mentioned in sources.
 
-6. general_considerations: Use only notes from entries. Combine ALL distinct notes. Separate with semicolons. Remove exact duplicates and near-duplicates (same meaning, different wording). Keep concise - 2-3 key points maximum. Include: monitoring, vague renal/hepatic warnings, interactions, side effects/toxicity, contraindications, special populations. Exclude: renal_adjustment info, external knowledge, redundant statements. Order: monitoring > warnings > interactions > side effects. Null if no notes.
+general_considerations: Combine distinct notes from all entries. Separate with semicolons. Remove duplicates and near-duplicates. Keep concise (2-3 key points). If guideline sources exist, prioritize guideline information. Include: monitoring requirements, vague renal/hepatic warnings, drug interactions, side effects, contraindications, special population considerations. Exclude: specific renal adjustment thresholds (those go in renal_adjustment), dosing details, external knowledge. Order by priority: monitoring > warnings > interactions > side effects. Use null if no notes found.
 
-7. is_combined: True if ANY source has is_combined=True OR medical_name contains "plus" (case-insensitive). False only if ALL indicate not combined.
+is_combined: True if any source has is_combined=True OR medical_name contains "plus" (case-insensitive). False only if all sources indicate not combined.
 
-8. is_complete: TRUE only if ALL fields are present AND complete. ALL fields are REQUIRED: medical_name, coverage_for, route_of_administration, dose_duration (must be COMPLETE with dose+freq+duration), renal_adjustment, general_considerations. FALSE if ANY field is missing, null, or incomplete. CRITICAL: If dose_duration is incomplete (missing dose, frequency, or duration), set dose_duration to null (so enrichment can extract it) and set is_complete to FALSE.
+is_complete: Set to TRUE only when ALL required fields are present and non-null: medical_name, coverage_for, route_of_administration, dose_duration (must be complete with dose, frequency, AND duration), renal_adjustment, general_considerations. Set to FALSE if any field is missing, null, or incomplete. CRITICAL: If dose_duration is incomplete (missing dose, frequency, or duration), set dose_duration to NULL and is_complete to FALSE (enrichment will extract it). If renal_adjustment is null, set is_complete to FALSE (enrichment will extract it).
 
-CONFLICT RESOLUTION: dose_duration: guideline > protocol > textbook > case report. route: combine unless contradictory. renal_adjustment: most restrictive threshold. coverage_for: most specific. general_considerations: combine unique points, remove duplicates.
-
-VALIDATION: Title Case + lowercase "plus" for combinations. Route: IV/PO/IM/IV/PO. dose_duration complete if marked. renal_adjustment: "Adjust dose for CrCl < X mL/min"/"No Renal Adjustment"/null. No duplication with general_considerations. is_combined reflects combinations. is_complete TRUE only when fully usable. No invented info.
-
-EDGE CASES: Preserve null if all null. Don't combine partial dosing across sources. Document contradictions in general_considerations. Deduplicate identical/near-identical info. Note population differences if stated.
+VALIDATION: medical_name in Title Case with lowercase "plus" for combinations. route_of_administration: Any valid route (IV, PO, IM, Vaginal, Intravaginal, Topical, Ophthalmic, Otic, Nasal, Rectal, Inhalation, or combinations like IV/PO, PO/Vaginal, etc.). dose_duration must include dose, frequency (q8h/q12h/q24h), and duration when complete, or NULL if incomplete. renal_adjustment: For systemic routes: "Adjust dose for CrCl < X mL/min", "No Renal Adjustment", or null. For non-systemic routes: "Not Applicable", "N/A", or null. general_considerations should not duplicate renal_adjustment content. is_combined reflects whether drug is a combination. is_complete is TRUE only when all fields are present, non-null, and complete. Do not invent information not found in sources.
 
 OUTPUT: ONE unified entry with best synthesized info. All formats match requirements."""
 
@@ -142,13 +133,11 @@ TASK: For each unique resistance gene, synthesize most accurate/complete info fr
 
 UNIFICATION RULES (per gene):
 
-1. detected_resistant_gene_name: Use only names from entries. Most standard/complete form. If differ, prefer most clinically standard. Don't change if all agree. Don't invent names.
+detected_resistant_gene_name: Use only names from entries. Most standard/complete form. If differ, prefer most clinically standard. Don't change if all agree. Don't invent names. Conflict resolution: most standard form.
 
-2. potential_medication_class_affected: Use only classes from entries. Combine all unique classes mentioned. Remove duplicates (e.g., "beta-lactams" and "beta-lactam antibiotics" → "beta-lactams"). Format: combine with commas. Examples: "beta-lactams, penicillins, cephalosporins, monobactams". Don't invent classes.
+potential_medication_class_affected: Use only classes from entries. Combine all unique classes mentioned. Remove duplicates (e.g., "beta-lactams" and "beta-lactam antibiotics" → "beta-lactams"). Format: combine with commas. Examples: "beta-lactams, penicillins, cephalosporins, monobactams". Don't invent classes. Conflict resolution: combine all unique classes, remove duplicates.
 
-3. general_considerations: Use only notes from entries. Combine ALL distinct notes. Separate with semicolons. CRITICAL: Remove exact duplicates AND near-duplicates (same meaning, different wording). Keep concise - 2-3 key points maximum. Include: resistance mechanisms, how gene confers resistance, clinical implications, inhibition by beta-lactamase inhibitors. Order: mechanism > clinical implications > inhibitors. Remove redundant statements (e.g., "hydrolyzes X" and "confers resistance to X" if they mean the same). Null if no notes.
-
-CONFLICT RESOLUTION: detected_resistant_gene_name: most standard form. potential_medication_class_affected: combine all unique classes, remove duplicates. general_considerations: combine unique points, remove duplicates and near-duplicates.
+general_considerations: Use only notes from entries. Combine ALL distinct notes. Separate with semicolons. CRITICAL: Remove exact duplicates AND near-duplicates (same meaning, different wording). Keep concise - 2-3 key points maximum. Include: resistance mechanisms, how gene confers resistance, clinical implications, inhibition by beta-lactamase inhibitors. Order: mechanism > clinical implications > inhibitors. Remove redundant statements (e.g., "hydrolyzes X" and "confers resistance to X" if they mean the same). Null if no notes. Conflict resolution: combine unique points, remove duplicates and near-duplicates.
 
 VALIDATION: detected_resistant_gene_name matches gene name. potential_medication_class_affected lists all affected classes without duplicates. general_considerations combines unique mechanisms/considerations without redundancy. No invented info.
 
@@ -167,7 +156,7 @@ Return is_match=True if same drug, is_match=False if different drug."""
 
 DOSAGE_EXTRACTION_PROMPT_TEMPLATE = """Extract ONLY missing fields for {medical_name} from drugs.com content.
 
-PATIENT: Age={patient_age} | ICD={icd_codes}{gene_context}
+PATIENT: Age={patient_age} | ICD={icd_codes}{gene_context}{allergy_context}
 
 CRITICAL: Extract STRICTLY based on the input context above. Do NOT extract information for other conditions, ICD codes, ages, or scenarios.
 
@@ -181,22 +170,15 @@ EXISTING DATA (context only, preserve if not missing):
 
 FIELDS (extract ONLY if in missing_fields):
 
-dose_duration: Format "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Match to ICD: {icd_codes}{gene_matching} and Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. Choose ONE most appropriate. Use null if no dosing info.
+dose_duration: Extract dosing information matching ICD: {icd_codes}{gene_matching} and Age: {patient_age}. PRIORITY: 1) Complete guideline recommendations (with dose, frequency, AND duration) - prioritize these first, 2) If no complete guidelines, use any available information (even if incomplete). Format complete: "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Format incomplete: "[dose] [route] [frequency]" if missing duration, or "[duration]" if only duration available. Frequency MUST include "q" prefix (q8h, q12h, q24h). Include loading doses if present. CRITICAL: Preserve percentage concentrations and formulations when present in content (e.g., "0.75% gel", "2% cream", "1.3% gel", "6.5% ointment") - these are part of the dose specification and must be included. Examples: "0.75% gel 5 g Vaginal q24h for 5 days" (correct - preserves percentage), "2% cream 5 g Vaginal q24h for 7 days" (correct - preserves percentage), "500 mg IV q8h for 7 days" (correct). NEVER include the drug name ({medical_name}) in dose_duration - only extract dose amount (with percentage/formulation if present), route, frequency, and duration. If the content mentions the drug name with dosing, extract only the dosing part. Examples: "500 mg IV q8h for 7 days" (correct), "{medical_name} 500 mg IV q8h for 7 days" (WRONG - remove drug name). Use null only if NO dosing information exists in content.
 
-route_of_administration: Extract from explicit mentions or infer from dosing. Values: "IV", "PO", "IM", or "IV/PO". Use null if no route info.
+route_of_administration: Extract the route of administration from explicit mentions or infer from dosing context. Acceptable values include systemic routes: "IV", "PO", "IM", "IV/PO", "IV/IM", "PO/IM", and non-systemic routes: "Vaginal", "Intravaginal", "Topical", "Ophthalmic", "Otic", "Nasal", "Rectal", "Inhalation", "Sublingual", "Buccal", or combinations like "PO/Vaginal", "Topical/Vaginal", "IV/PO", etc. Use the exact route mentioned in the content. For non-systemic conditions, extract routes like "Vaginal", "Intravaginal", "Topical" as appropriate. Use null if no route info.
 
 coverage_for: Format "[Pathogen] [condition]" using clinical terminology (e.g., "MRSA bacteremia", "VRE bacteremia"). Match to patient's clinical condition (ICD: {icd_codes}{gene_context}). Use null if no info.
 
-renal_adjustment: "No Renal Adjustment" if explicitly stated OR if not found/not mentioned. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Default to "No Renal Adjustment" if not mentioned. Do not duplicate general_considerations.
+renal_adjustment: Extract ONLY what is explicitly mentioned in the content. For systemic medications (IV, PO, IM): "No Renal Adjustment" if explicitly stated OR if not found/not mentioned. If CrCl threshold mentioned, use "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Default to "No Renal Adjustment" if not mentioned. For non-systemic medications (topical, vaginal, ophthalmic, otic, etc.): Use null if not mentioned in content. DO NOT add "Not Applicable" or "N/A" during extraction - only extract what is explicitly stated in the content. Do not duplicate general_considerations.
 
 general_considerations: Extract monitoring, warnings, toxicity, interactions, contraindications. Separate with semicolons. Exclude dosing, drug class descriptions. Use null if no info.
 
-CRITICAL RULES:
-1. Extract ONLY fields in missing_fields - preserve existing for others
-2. Match to input context: ICD: {icd_codes}{gene_matching}, Age: {patient_age}
-3. Frequency MUST include "q" prefix (q8h, q12h, q24h)
-4. DO NOT invent information - use only what's in content
-5. Maintain consistency with existing data AND previous chunks context
-6. If previous chunks extracted fields, maintain consistency (e.g., same route, compatible dosing)
-7. Accuracy > completeness"""
+CRITICAL RULES: Extract ONLY fields in missing_fields - preserve existing for others. Match to input context: ICD: {icd_codes}{gene_matching}, Age: {patient_age}. Frequency MUST include "q" prefix (q8h, q12h, q24h). DO NOT invent information - use only what's in content. Maintain consistency with existing data AND previous chunks context. If previous chunks extracted fields, maintain consistency (e.g., same route, compatible dosing). Accuracy > completeness."""
 

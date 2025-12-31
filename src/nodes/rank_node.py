@@ -38,6 +38,7 @@ def _filter_antibiotics_with_llm(
     age: Optional[int],
     sample: Optional[str],
     systemic: Optional[bool],
+    allergies: Optional[List[str]] = None,
     retry_delay: float = 2.0
 ) -> Dict[str, Any]:
     """
@@ -87,16 +88,41 @@ def _filter_antibiotics_with_llm(
         resistance_decision_step = ""
         resistance_genes_evaluation = ""
     
+    # Build conditional allergy sections
+    from utils import format_allergies
+    allergy_display = format_allergies(allergies) if allergies else None
+    if allergy_display:
+        allergy_context = f" | Allergies: {allergy_display}"
+        allergy_decision_step = "2a. Patient allergic to this antibiotic or cross-reactive class? YES→filter, NO→continue\n"
+        allergy_filtering_criteria = f" OR patient allergic to {allergy_display} (including cross-reactive classes)"
+        allergy_evaluation = f"""ALLERGIES: Patient has allergies to: {allergy_display}. FILTER OUT antibiotics that:
+- Are the exact allergen (e.g., penicillin allergy → filter penicillins)
+- Are in the same drug class (e.g., penicillin allergy → consider filtering cephalosporins if severe allergy)
+- Contain the allergen (e.g., sulfa allergy → filter TMP-SMX, sulfonamides)
+- Have known cross-reactivity (e.g., penicillin → cephalosporins in severe cases)
+
+CRITICAL: For severe/life-threatening allergies, filter all cross-reactive antibiotics. For mild allergies, consider alternatives but prioritize safety.
+"""
+    else:
+        allergy_context = ""
+        allergy_decision_step = ""
+        allergy_filtering_criteria = ""
+        allergy_evaluation = ""
+    
     prompt = ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE.format(
         pathogen_display=pathogen_display,
         resistance_context=resistance_context,
+        allergy_context=allergy_context,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
         sample=sample or 'Not specified',
         systemic='Yes' if systemic else 'No',
         antibiotic_list=antibiotic_list,
         resistance_decision_step=resistance_decision_step,
-        resistance_genes_evaluation=resistance_genes_evaluation
+        resistance_genes_evaluation=resistance_genes_evaluation,
+        allergy_decision_step=allergy_decision_step,
+        allergy_filtering_criteria=allergy_filtering_criteria,
+        allergy_evaluation=allergy_evaluation
     )
     
     attempt = 0
@@ -463,6 +489,8 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             resistant_genes = get_resistance_genes_from_input(input_params)
             resistant_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
+            from utils import get_allergies_from_input
+            allergies = get_allergies_from_input(input_params)
             
             severity_codes = get_icd_names_from_state(state)
             age = input_params.get('age')
@@ -481,7 +509,8 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 severity_codes=severity_codes,
                 age=age,
                 sample=sample,
-                systemic=systemic
+                systemic=systemic,
+                allergies=allergies
             )
             
             # Emit progress for filtering complete

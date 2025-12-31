@@ -58,6 +58,7 @@ class InputParameters(BaseModel):
     age: Optional[int] = None
     sample: Optional[str] = None
     systemic: Optional[bool] = None
+    allergy: Optional[List[str]] = None
 
 
 class UnifiedResistanceGene(BaseModel):

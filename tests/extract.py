@@ -147,13 +147,27 @@ def test_extract_node(
         raise
 
 
-def get_inputs_from_file() -> Dict[str, Any]:
-    """Load input parameters from input.json."""
-    input_file = project_root / "input.json"
+def get_inputs_from_file(input_file_path: str = None) -> Dict[str, Any]:
+    """Load input parameters from a JSON file."""
+    if input_file_path:
+        input_file = Path(input_file_path)
+    else:
+        # Try to find input.json as fallback (optional)
+        input_file = project_root / "input.json"
     
     if not input_file.exists():
-        logger.error(f"input.json not found at {input_file}")
-        raise FileNotFoundError(f"input.json not found at {input_file}")
+        # Create default test input if file doesn't exist
+        logger.warning(f"Input file not found at {input_file}. Using default test input.")
+        return {
+            "pathogens": [
+                {"pathogen_name": "Staphylococcus aureus", "pathogen_count": "10^3 CFU/ML"}
+            ],
+            "resistant_genes": ["mecA"],
+            "severity_codes": ["A41.2"],
+            "age": 32,
+            "sample": "Blood",
+            "systemic": True
+        }
     
     with open(input_file, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -161,13 +175,20 @@ def get_inputs_from_file() -> Dict[str, Any]:
 
 def main():
     """Main function."""
-    # Load inputs from input.json
-    input_parameters = get_inputs_from_file()
+    # Load inputs from command-line argument or use default
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.json') and Path(sys.argv[1]).exists():
+        # First argument is an input JSON file
+        input_parameters = get_inputs_from_file(sys.argv[1])
+        # Remaining arguments are for search results
+        search_results_file = sys.argv[2] if len(sys.argv) > 2 else None
+    else:
+        # No input file specified, use default or try to find input.json
+        input_parameters = get_inputs_from_file()
+        search_results_file = sys.argv[1] if len(sys.argv) > 1 else None
     
-    # Parse command line arguments
-    if len(sys.argv) > 1:
-        # First argument: path to search results JSON file or perplexity cache
-        search_results_file = sys.argv[1]
+    # Parse command line arguments for search results
+    if search_results_file:
+        # Load search results from specified file
         search_results = load_search_results(search_results_file)
     else:
         # No arguments: try to find most recent perplexity cache
@@ -237,8 +258,14 @@ def main():
             
             logger.info(f"Search completed. Found {len(search_results)} results.")
     
-    # Second argument: output file path (optional)
-    output_file = sys.argv[2] if len(sys.argv) > 2 else None
+    # Last argument: output file path (optional)
+    # Determine output file based on argument position
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.json') and Path(sys.argv[1]).exists():
+        # Input file was first arg, so output is 3rd arg
+        output_file = sys.argv[3] if len(sys.argv) > 3 else None
+    else:
+        # No input file, so output is 2nd arg
+        output_file = sys.argv[2] if len(sys.argv) > 2 else None
     
     # Run test
     test_extract_node(

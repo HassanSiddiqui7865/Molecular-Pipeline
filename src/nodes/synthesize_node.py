@@ -148,6 +148,21 @@ def _unify_antibiotic_group_with_llm(
                 if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
                     unified[key] = None
             
+            # CRITICAL FALLBACK: If LLM returned null for dose_duration but entries have it, use the most complete one
+            if unified.get('dose_duration') is None:
+                available_dose_durations = [e.get('dose_duration') for e in entries if e.get('dose_duration')]
+                if available_dose_durations:
+                    # Prioritize complete ones (with duration), then incomplete ones
+                    complete_ones = [d for d in available_dose_durations if 'for' in d.lower() or 'week' in d.lower() or 'day' in d.lower()]
+                    if complete_ones:
+                        # Use the most comprehensive complete one
+                        unified['dose_duration'] = max(complete_ones, key=lambda x: len(x))
+                        logger.info(f"Fallback: Used dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
+                    else:
+                        # Use the longest incomplete one
+                        unified['dose_duration'] = max(available_dose_durations, key=lambda x: len(x))
+                        logger.info(f"Fallback: Used incomplete dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
+            
             return unified
             
         except Exception as e:
@@ -477,7 +492,8 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Save results to file
         input_params = state.get('input_parameters', {})
-        _save_synthesize_results(input_params, result)
+        icd_transformation = state.get('icd_transformation', {})
+        _save_synthesize_results(input_params, result, icd_transformation)
         
         return {
             'result': result
@@ -488,7 +504,7 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def _save_synthesize_results(input_params: Dict, result: Dict) -> None:
+def _save_synthesize_results(input_params: Dict, result: Dict, icd_transformation: Dict = None) -> None:
     """Save synthesize results to file."""
     try:
         from config import get_output_config
@@ -497,11 +513,25 @@ def _save_synthesize_results(input_params: Dict, result: Dict) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         output_file = output_dir / "synthesize_result.json"
+        
+        output_data = {
+            'input_parameters': input_params,
+            'result': result
+        }
+        
+        # Include ICD transformation with formatted codes (Code (Name))
+        if icd_transformation:
+            from utils import get_icd_names_from_state
+            # Create a temporary state dict to get formatted ICD codes
+            temp_state = {'icd_transformation': icd_transformation}
+            icd_codes_formatted = get_icd_names_from_state(temp_state)
+            output_data['icd_transformation'] = {
+                **icd_transformation,
+                'icd_codes_formatted': icd_codes_formatted  # Add formatted string with names
+            }
+        
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'input_parameters': input_params,
-                'result': result
-            }, f, indent=2, ensure_ascii=False)
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
         
         logger.info(f"Synthesize results saved to: {output_file}")
     except Exception as e:

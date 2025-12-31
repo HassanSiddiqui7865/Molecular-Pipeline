@@ -283,6 +283,50 @@ def get_severity_codes_from_input(input_params: Dict[str, Any]) -> List[str]:
     return [str(c).strip().upper() for c in codes if c and str(c).strip()]
 
 
+def get_allergies_from_input(input_params: Dict[str, Any]) -> List[str]:
+    """
+    Get allergies list from input parameters.
+    
+    Args:
+        input_params: Input parameters dictionary
+        
+    Returns:
+        List of allergy strings
+    """
+    allergies = input_params.get('allergy', [])
+    if not isinstance(allergies, list):
+        return []
+    
+    return [str(a).strip() for a in allergies if a and str(a).strip()]
+
+
+def format_allergies(allergies: List[str]) -> Optional[str]:
+    """
+    Format allergies list to readable format.
+    
+    Args:
+        allergies: List of allergies (e.g., ["penicillin", "sulfa"])
+        
+    Returns:
+        Formatted string for use in prompts (e.g., "penicillin and sulfa" or "penicillin"), or None if empty
+    """
+    if not allergies:
+        return None
+    
+    allergy_list = [allergy.strip() for allergy in allergies if allergy and str(allergy).strip()]
+    
+    if not allergy_list:
+        return None
+    
+    if len(allergy_list) == 1:
+        return allergy_list[0]
+    elif len(allergy_list) == 2:
+        return f"{allergy_list[0]} and {allergy_list[1]}"
+    else:
+        # Format as "allergy1, allergy2, and allergy3"
+        return ", ".join(allergy_list[:-1]) + f", and {allergy_list[-1]}"
+
+
 def create_llm() -> Optional[Ollama]:
     """
     Create LlamaIndex Ollama LLM instance.

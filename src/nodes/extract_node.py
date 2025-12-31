@@ -38,6 +38,7 @@ def _extract_with_llamaindex(
     systemic: bool,
     pathogens: Optional[List[Dict[str, str]]] = None,
     resistant_genes_list: Optional[List[str]] = None,
+    allergies: Optional[List[str]] = None,
     source_title: str = "",
     retry_delay: float = 2.0
 ) -> Dict[str, Any]:
@@ -70,18 +71,31 @@ def _extract_with_llamaindex(
         resistance_genes_section = ""
         resistance_filtering_rule = ""
     
+    # Build conditional allergy sections
+    from utils import format_allergies
+    allergy_display = format_allergies(allergies) if allergies else None
+    if allergy_display:
+        allergy_context = f" | Allergies: {allergy_display}"
+        allergy_filtering_rule = f"""4. Filtering: DO NOT extract antibiotics that patient is allergic to ({allergy_display}). Example: penicillin allergy → skip penicillins, amoxicillin, ampicillin, and consider cross-reactivity with cephalosporins. sulfa allergy → skip sulfonamides, TMP-SMX. Only extract antibiotics that are safe for the patient.
+"""
+    else:
+        allergy_context = ""
+        allergy_filtering_rule = ""
+    
     # Format prompt
     prompt = EXTRACTION_PROMPT_TEMPLATE.format(
         pathogen_display=pathogen_name,
         resistance_context=resistance_context,
         resistance_task=resistance_task,
+        allergy_context=allergy_context,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
         sample=sample or 'Not specified',
         systemic='Yes' if systemic else 'No',
         content=content,
         resistance_genes_section=resistance_genes_section,
-        resistance_filtering_rule=resistance_filtering_rule
+        resistance_filtering_rule=resistance_filtering_rule,
+        allergy_filtering_rule=allergy_filtering_rule
     )
     
     attempt = 0
@@ -189,6 +203,8 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
         pathogen_display = format_pathogens(pathogens)
         resistant_genes = get_resistance_genes_from_input(input_params)
         resistant_gene_display = format_resistance_genes(resistant_genes)
+        from utils import get_allergies_from_input
+        allergies = get_allergies_from_input(input_params)
         severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')
         sample = input_params.get('sample', '')
@@ -217,6 +233,7 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 systemic=systemic,
                 pathogens=pathogens,
                 resistant_genes_list=resistant_genes,
+                allergies=allergies,
                 source_title=result.title
             )
             

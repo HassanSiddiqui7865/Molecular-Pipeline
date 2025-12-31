@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Add src to path for imports
 project_root = Path(__file__).parent
@@ -118,14 +118,10 @@ def run_pipeline_with_progress(session_id: str, input_params: dict):
             max_tokens_per_page=perplexity_config.get('max_tokens_per_page', 4096)
         )
         
-        emit_progress(session_id, 'icd_transform', 'Transforming ICD codes...', 10)
-        
         # Check for cached search results
         from main import get_cache_filename, load_cached_search_results
         cache_path = get_cache_filename(input_params)
         cached_data = load_cached_search_results(cache_path)
-        
-        emit_progress(session_id, 'search', 'Searching for medical literature...', 20)
         
         # Create pipeline graph
         graph = create_pipeline_graph()
@@ -138,13 +134,13 @@ def run_pipeline_with_progress(session_id: str, input_params: dict):
             """Callback for granular progress updates from nodes."""
             # Calculate overall progress based on stage and sub-progress
             stage_ranges = {
-                'icd_transform': (10, 20),
-                'search': (20, 30),
-                'extract': (30, 50),
-                'parse': (50, 55),
-                'rank': (55, 65),
-                'synthesize': (65, 80),
-                'enrichment': (80, 100)
+                'icd_transform': (0, 10),
+                'search': (10, 20),
+                'extract': (20, 40),
+                'parse': (40, 45),
+                'rank': (45, 55),
+                'synthesize': (55, 70),
+                'enrichment': (70, 100)
             }
             
             if stage in stage_ranges:
@@ -165,12 +161,7 @@ def run_pipeline_with_progress(session_id: str, input_params: dict):
             }
         }
         
-        # Run graph - progress will be tracked by monitoring node execution
-        # Since LangGraph doesn't have built-in progress callbacks, we'll emit progress
-        # at key stages by monitoring the state transitions
-        emit_progress(session_id, 'running', 'Pipeline is running...', 15)
-        
-        # Run graph
+        # Run graph - progress will be tracked by nodes through progress_callback
         final_state = graph.invoke(initial_state)
         
         # Emit progress updates based on state
@@ -245,6 +236,7 @@ class PipelineInput(BaseModel):
     age: Optional[int] = None
     sample: Optional[str] = None
     systemic: Optional[bool] = None
+    allergy: Optional[List[str]] = None
 
 
 @app.get('/')

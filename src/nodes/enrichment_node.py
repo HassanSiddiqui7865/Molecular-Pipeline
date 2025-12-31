@@ -89,10 +89,10 @@ def _get_selenium_driver() -> Optional[Any]:
         
         driver = webdriver.Chrome(options=chrome_options)
         
-        # Set reasonable timeouts (will retry on failure)
-        driver.set_page_load_timeout(120)
-        driver.implicitly_wait(10)
-        driver.set_script_timeout(120)
+        # Set reasonable timeouts - don't wait for full page load
+        driver.set_page_load_timeout(10)  # Short timeout, we'll wait for specific elements instead
+        driver.implicitly_wait(5)
+        driver.set_script_timeout(10)
         
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
@@ -126,21 +126,30 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
         search_query = f"{antibiotic_name} dosage drug.com"
         logger.info(f"Searching DuckDuckGo for {antibiotic_name}...")
         
-        # Retry page load for DuckDuckGo
+        # Navigate to DuckDuckGo - don't wait for full page load
         max_retries = 3
         retry_delay = 2.0
+        navigation_success = False
         for attempt in range(max_retries):
             try:
                 driver.get("https://duckduckgo.com/")
-                time.sleep(random.uniform(1.5, 3.0))
+                navigation_success = True
                 break
             except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"DuckDuckGo page load failed (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                # Timeout is OK - we'll wait for search box instead
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    logger.debug(f"DuckDuckGo page load timeout (attempt {attempt + 1}/{max_retries}), continuing to wait for search box...")
+                    navigation_success = True  # Continue anyway
+                    break
+                elif attempt < max_retries - 1:
+                    logger.warning(f"DuckDuckGo navigation failed (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
                     time.sleep(retry_delay * (attempt + 1))
                 else:
-                    logger.warning(f"DuckDuckGo page load failed after {max_retries} attempts: {e}")
+                    logger.warning(f"DuckDuckGo navigation failed after {max_retries} attempts: {e}")
                     return None
+        
+        if not navigation_success:
+            return None
         
         # Retry waiting for search box
         search_box = None
@@ -186,8 +195,12 @@ def _google_search_drugs_com_selenium(antibiotic_name: str, driver: Any) -> Opti
             logger.warning(f"Error during search interaction: {e}, trying direct URL as fallback")
             encoded_query = quote_plus(search_query)
             duckduckgo_url = f"https://duckduckgo.com/?q={encoded_query}"
-            driver.get(duckduckgo_url)
-            time.sleep(2)
+            try:
+                driver.get(duckduckgo_url)
+            except Exception as nav_error:
+                # Timeout is OK - we'll wait for results anyway
+                if "timeout" not in str(nav_error).lower() and "timed out" not in str(nav_error).lower():
+                    logger.warning(f"Fallback navigation failed: {nav_error}")
         
         try:
             time.sleep(3)
@@ -295,20 +308,30 @@ def _validate_antibiotic_match(
     try:
         logger.info(f"Validating antibiotic match for {antibiotic_name} at {url}...")
         
-        # Retry page load with exponential backoff
+        # Navigate to URL - don't wait for full page load
         max_retries = 3
         retry_delay = 2.0
+        navigation_success = False
         for attempt in range(max_retries):
             try:
                 driver.get(url)
-                time.sleep(random.uniform(1.5, 2.5))
+                navigation_success = True
                 break
             except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Page load failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                # Timeout is OK - we'll get title anyway
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    logger.debug(f"Page load timeout for {url} (attempt {attempt + 1}/{max_retries}), continuing to get title...")
+                    navigation_success = True  # Continue anyway
+                    break
+                elif attempt < max_retries - 1:
+                    logger.warning(f"Navigation failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
                     time.sleep(retry_delay * (attempt + 1))
                 else:
-                    logger.warning(f"Page load failed after {max_retries} attempts for {url}: {e}, continuing with title check")
+                    logger.warning(f"Navigation failed after {max_retries} attempts for {url}: {e}, continuing with title check")
+                    navigation_success = True  # Continue anyway to try getting title
+        
+        if not navigation_success:
+            return True  # Fail open
         
         # Get page title
         page_title = driver.title if driver.title else ""
@@ -372,28 +395,37 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> Optional[str]:
     try:
         logger.info(f"Navigating directly to {url}...")
         
-        # Retry page load with exponential backoff
+        # Navigate to URL - don't wait for full page load, just start navigation
         max_retries = 3
         retry_delay = 2.0
+        navigation_success = False
         for attempt in range(max_retries):
             try:
                 driver.get(url)
-                time.sleep(random.uniform(2.0, 3.5))
+                navigation_success = True
                 break
             except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Page load failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                # Timeout is OK - we'll wait for specific element instead
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    logger.debug(f"Page load timeout for {url} (attempt {attempt + 1}/{max_retries}), continuing to wait for content element...")
+                    navigation_success = True  # Continue anyway
+                    break
+                elif attempt < max_retries - 1:
+                    logger.warning(f"Navigation failed for {url} (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
                     time.sleep(retry_delay * (attempt + 1))
                 else:
-                    logger.warning(f"Page load failed after {max_retries} attempts for {url}: {e}")
+                    logger.warning(f"Navigation failed after {max_retries} attempts for {url}: {e}")
                     return None
         
-        # Retry waiting for content element
+        if not navigation_success:
+            return None
+        
+        # Wait only for content element to be available (don't wait for entire page)
         max_wait_retries = 3
         content_element = None
         for attempt in range(max_wait_retries):
             try:
-                content_element = WebDriverWait(driver, 10).until(
+                content_element = WebDriverWait(driver, 15).until(
                     EC.presence_of_element_located((By.ID, "content"))
                 )
                 break
@@ -534,6 +566,7 @@ def _extract_fields_with_llamaindex(
     age: Optional[int],
     icd_code_names: Optional[str] = None,
     resistance_gene: Optional[str] = None,
+    allergies: Optional[List[str]] = None,
     retry_delay: float = 2.0
 ) -> Dict[str, Optional[str]]:
     """
@@ -574,6 +607,14 @@ def _extract_fields_with_llamaindex(
         else:
             gene_context = ""
             gene_matching = ""
+        
+        # Build conditional allergy sections
+        from utils import format_allergies
+        allergy_display = format_allergies(allergies) if allergies else None
+        if allergy_display:
+            allergy_context = f" | Allergies={allergy_display}"
+        else:
+            allergy_context = ""
         
         # Build existing data context
         existing_data_context = ""
@@ -635,6 +676,7 @@ def _extract_fields_with_llamaindex(
                         icd_codes=icd_code_names_str,
                         gene_context=gene_context,
                         gene_matching=gene_matching,
+                        allergy_context=allergy_context,
                         missing_fields=missing_fields_str,
                         existing_data=existing_data_context,
                         cross_chunk_context=cross_chunk_context,
@@ -703,6 +745,11 @@ def _extract_fields_with_llamaindex(
             else:
                 # Not missing, preserve existing
                 extracted[field] = existing_data.get(field)
+        
+      
+        if 'renal_adjustment' in missing_fields and extracted.get('renal_adjustment') is None:
+            extracted['renal_adjustment'] = "No Renal Adjustment"
+            logger.info(f"Set renal_adjustment to 'No Renal Adjustment' (default) for {medical_name}")
         
         # Special handling for general_considerations - blend if both exist
         if 'general_considerations' in missing_fields:
@@ -908,9 +955,10 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
         icd_code_names = get_icd_names_from_state(state)
         
         # Get resistance genes from input parameters and format
-        from utils import get_resistance_genes_from_input, format_resistance_genes
+        from utils import get_resistance_genes_from_input, format_resistance_genes, get_allergies_from_input
         resistant_genes = get_resistance_genes_from_input(input_params)
         resistance_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
+        allergies = get_allergies_from_input(input_params)
         
         age = input_params.get('age')
         
@@ -963,7 +1011,8 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     existing_data=antibiotic,  # Pass existing data to blend with
                     age=age,
                     icd_code_names=icd_code_names,
-                    resistance_gene=resistance_gene
+                    resistance_gene=resistance_gene,
+                    allergies=allergies
                 )
                 
                 # Update antibiotic with extracted fields (only update missing fields)
@@ -974,9 +1023,50 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         antibiotic[field] = extracted_fields[field]
                         updated = True
                         # Check if this is a required field (for completeness)
-                        if field in ['coverage_for', 'dose_duration', 'route_of_administration']:
+                        # All fields are required for is_complete
+                        if field in ['coverage_for', 'dose_duration', 'route_of_administration', 'renal_adjustment', 'general_considerations']:
                             required_fields_updated = True
                         logger.info(f"  ✓ Updated {field} for {medical_name}")
+                
+                # CRITICAL: If route_of_administration has multiple routes but dose_duration only has one route,
+                # update route_of_administration to match the route in dose_duration
+                if 'dose_duration' in extracted_fields and extracted_fields.get('dose_duration'):
+                    dose_duration = extracted_fields['dose_duration']
+                    current_route = antibiotic.get('route_of_administration', '')
+                    
+                    # Check if current route has multiple routes (separated by /)
+                    if current_route and '/' in current_route:
+                        routes = [r.strip() for r in current_route.split('/')]
+                        # Extract route from dose_duration
+                        dose_route = None
+                        for route in routes:
+                            # Check if this route appears in dose_duration
+                            if route.lower() in dose_duration.lower() or route in dose_duration:
+                                dose_route = route
+                                break
+                        
+                        # If we found a matching route in dose_duration, update route_of_administration
+                        if dose_route:
+                            antibiotic['route_of_administration'] = dose_route
+                            logger.info(f"  ✓ Updated route_of_administration to '{dose_route}' (only found dosage for this route)")
+                        # If dose_duration has "or" separator, check both sides
+                        elif ' or ' in dose_duration:
+                            # Extract routes from both sides of "or"
+                            parts = dose_duration.split(' or ')
+                            found_routes = []
+                            for part in parts:
+                                for route in routes:
+                                    if route.lower() in part.lower() or route in part:
+                                        if route not in found_routes:
+                                            found_routes.append(route)
+                            
+                            if found_routes:
+                                antibiotic['route_of_administration'] = '/'.join(found_routes)
+                                logger.info(f"  ✓ Updated route_of_administration to '{'/'.join(found_routes)}' (found dosages for these routes)")
+                    # If dose_duration has "or" separator, extract routes from both sides
+                    elif ' or ' in dose_duration and current_route:
+                        # This means we have multiple dosages, keep the combined route
+                        pass  # Keep as is
                 
                 # Update is_complete status
                 antibiotic['is_complete'] = (
@@ -989,7 +1079,11 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 # For first_choice and second_choice: if no required fields were extracted, remove it
-                if not updated or (missing_fields and not required_fields_updated):
+                if not updated:
+                    logger.warning(f"  No fields extracted for {medical_name}, removing from {category} (first_choice/second_choice require extraction)")
+                    antibiotics_to_remove[category].append(idx)
+                elif missing_fields and not required_fields_updated:
+                    # This shouldn't happen now since all fields are required, but keep as safety check
                     logger.warning(f"  No required fields extracted for {medical_name}, removing from {category} (first_choice/second_choice require extraction)")
                     antibiotics_to_remove[category].append(idx)
                     # Emit progress even if failed
@@ -1094,7 +1188,8 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 existing_data=antibiotic,
                                 age=age,
                                 icd_code_names=icd_code_names,
-                                resistance_gene=resistance_gene
+                                resistance_gene=resistance_gene,
+                                allergies=allergies
                             )
                             
                             # Update antibiotic with extracted fields
@@ -1104,6 +1199,46 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                     antibiotic[field] = extracted_fields[field]
                                     updated = True
                                     logger.info(f"  ✓ Updated {field} for {medical_name}")
+                            
+                            # CRITICAL: If route_of_administration has multiple routes but dose_duration only has one route,
+                            # update route_of_administration to match the route in dose_duration
+                            if 'dose_duration' in extracted_fields and extracted_fields.get('dose_duration'):
+                                dose_duration = extracted_fields['dose_duration']
+                                current_route = antibiotic.get('route_of_administration', '')
+                                
+                                # Check if current route has multiple routes (separated by /)
+                                if current_route and '/' in current_route:
+                                    routes = [r.strip() for r in current_route.split('/')]
+                                    # Extract route from dose_duration
+                                    dose_route = None
+                                    for route in routes:
+                                        # Check if this route appears in dose_duration
+                                        if route.lower() in dose_duration.lower() or route in dose_duration:
+                                            dose_route = route
+                                            break
+                                    
+                                    # If we found a matching route in dose_duration, update route_of_administration
+                                    if dose_route:
+                                        antibiotic['route_of_administration'] = dose_route
+                                        logger.info(f"  ✓ Updated route_of_administration to '{dose_route}' (only found dosage for this route)")
+                                    # If dose_duration has "or" separator, check both sides
+                                    elif ' or ' in dose_duration:
+                                        # Extract routes from both sides of "or"
+                                        parts = dose_duration.split(' or ')
+                                        found_routes = []
+                                        for part in parts:
+                                            for route in routes:
+                                                if route.lower() in part.lower() or route in part:
+                                                    if route not in found_routes:
+                                                        found_routes.append(route)
+                                        
+                                        if found_routes:
+                                            antibiotic['route_of_administration'] = '/'.join(found_routes)
+                                            logger.info(f"  ✓ Updated route_of_administration to '{'/'.join(found_routes)}' (found dosages for these routes)")
+                                # If dose_duration has "or" separator, extract routes from both sides
+                                elif ' or ' in dose_duration and current_route:
+                                    # This means we have multiple dosages, keep the combined route
+                                    pass  # Keep as is
                             
                             # Update is_complete status
                             antibiotic['is_complete'] = (
@@ -1184,7 +1319,8 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Save results
         input_params = state.get('input_parameters', {})
-        _save_enrichment_results(input_params, result)
+        icd_transformation = state.get('icd_transformation', {})
+        _save_enrichment_results(input_params, result, icd_transformation)
         
         return {'result': result}
         
@@ -1193,7 +1329,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def _save_enrichment_results(input_params: Dict, result: Dict) -> None:
+def _save_enrichment_results(input_params: Dict, result: Dict, icd_transformation: Dict = None) -> None:
     """Save enrichment results to file."""
     try:
         from config import get_output_config
@@ -1202,11 +1338,25 @@ def _save_enrichment_results(input_params: Dict, result: Dict) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         output_file = output_dir / "enrichment_result.json"
+        
+        output_data = {
+            'input_parameters': input_params,
+            'result': result
+        }
+        
+        # Include ICD transformation with formatted codes (Code (Name))
+        if icd_transformation:
+            from utils import get_icd_names_from_state
+            # Create a temporary state dict to get formatted ICD codes
+            temp_state = {'icd_transformation': icd_transformation}
+            icd_codes_formatted = get_icd_names_from_state(temp_state)
+            output_data['icd_transformation'] = {
+                **icd_transformation,
+                'icd_codes_formatted': icd_codes_formatted  # Add formatted string with names
+            }
+        
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'input_parameters': input_params,
-                'result': result
-            }, f, indent=2, ensure_ascii=False)
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
         
         logger.info(f"Enrichment results saved to: {output_file}")
     except Exception as e:

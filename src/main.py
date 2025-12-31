@@ -92,22 +92,34 @@ def main():
     
     # Ollama configuration is now handled in each node that needs it
     
-    # Load inputs from input.json
-    input_file = project_root / "input.json"
-    if input_file.exists():
-        with open(input_file, 'r', encoding='utf-8') as f:
-            inputs = json.load(f)
-    else:
-        logger.error(f"input.json not found at {input_file}")
-        logger.error("Please create input.json with the required input parameters")
-        sys.exit(1)
+    # Load inputs from command-line argument (JSON file path) or stdin
+    inputs = None
     
-    # Allow override via command-line arguments
     if len(sys.argv) > 1:
-        for arg in sys.argv[1:]:
-            if '=' in arg:
-                key, value = arg.split('=', 1)
-                inputs[key] = value
+        # First argument: path to JSON file with input parameters
+        input_file = Path(sys.argv[1])
+        if input_file.exists():
+            with open(input_file, 'r', encoding='utf-8') as f:
+                inputs = json.load(f)
+        else:
+            logger.error(f"Input file not found at {input_file}")
+            sys.exit(1)
+    else:
+        # Try to read from stdin
+        try:
+            if not sys.stdin.isatty():
+                inputs = json.load(sys.stdin)
+            else:
+                logger.error("No input provided. Usage: python main.py <input.json>")
+                logger.error("Or pipe JSON input: echo '{\"pathogens\":[...]}' | python main.py")
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON input: {e}")
+            sys.exit(1)
+    
+    if not inputs:
+        logger.error("No input parameters provided")
+        sys.exit(1)
     
     logger.info(f"Input parameters: {inputs}")
     
@@ -196,13 +208,13 @@ def main():
     
     # Optionally export to PDF
     try:
+        # Use xhtml2pdf (pisa) - pure Python, no system dependencies
         from export_pdf import export_to_pdf
-        # Export PDF
         pdf_path = export_to_pdf(output_data)
         logger.info(f"PDF report exported to: {pdf_path}")
     except ImportError as e:
         logger.warning(f"PDF export not available: {e}")
-        logger.info("Install xhtml2pdf to enable PDF export: pip install xhtml2pdf")
+        logger.info("Install xhtml2pdf: pip install xhtml2pdf")
     except Exception as e:
         logger.warning(f"Error exporting PDF: {e}")
 
