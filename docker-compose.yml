@@ -18,7 +18,8 @@ services:
       - ./output:/app/output
       # Mount .env file if you want to edit it without rebuilding
       - ./.env:/app/.env:ro
-      # Mount key file for SSH (if exists)
+      # Mount key file for SSH (try key.txt first, fallback to key)
+      - ./key.txt:/app/key.txt:ro
       - ./key:/app/key:ro
     restart: unless-stopped
     healthcheck:

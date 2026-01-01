@@ -150,23 +150,39 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        # Load SSH key from project root (always look for "key" file)
+        # Load SSH key from project root (check for both "key" and "key.txt")
         pkey = None
-        project_root = Path(__file__).parent.parent.parent
-        ssh_key_path = project_root / 'key'
+        project_root = Path(__file__).parent.parent
+        # Try both "key.txt" and "key" (key.txt takes precedence)
+        ssh_key_path = None
+        for key_name in ['key.txt', 'key']:
+            potential_path = project_root / key_name
+            if potential_path.exists() and potential_path.is_file():
+                ssh_key_path = potential_path
+                break
+        
         ssh_password = db_config.get('ssh_password', '')
         
+        if ssh_key_path:
+            logger.info(f"Looking for SSH key at: {ssh_key_path}")
+            logger.info(f"Key file exists: {ssh_key_path.exists()}")
+        else:
+            logger.info(f"SSH key file not found in project root ({project_root}), tried: key, key.txt")
+        
         # Try to load key from project root if it exists
-        if ssh_key_path.exists() and ssh_key_path.is_file():
+        if ssh_key_path and ssh_key_path.exists() and ssh_key_path.is_file():
+            logger.info(f"Found SSH key file at {ssh_key_path}, attempting to load...")
             key_errors = []
             for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
                 try:
                     try:
                         pkey = key_class.from_private_key_file(str(ssh_key_path))
+                        logger.info(f"Successfully loaded SSH key as {key_class.__name__}")
                         break
                     except paramiko.ssh_exception.PasswordRequiredException:
                         if ssh_password:
                             pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_password)
+                            logger.info(f"Successfully loaded SSH key as {key_class.__name__} with passphrase")
                             break
                         else:
                             raise
@@ -178,18 +194,43 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
             if not pkey:
                 logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
                 logger.info("Will attempt SSH connection with password only")
+        else:
+            logger.info(f"SSH key file not found at {ssh_key_path}, will use password authentication only")
         
         # Connect to SSH server
         logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
-        ssh_client.connect(
-            hostname=db_config['ssh_host'],
-            port=db_config['ssh_port'],
-            username=db_config['ssh_username'],
-            pkey=pkey,
-            password=db_config.get('ssh_password'),
-            allow_agent=False,
-            look_for_keys=False
-        )
+        auth_method = 'key' if pkey else 'password'
+        logger.info(f"Using authentication method: {auth_method}")
+        
+        try:
+            if pkey:
+                # Use key-based authentication
+                ssh_client.connect(
+                    hostname=db_config['ssh_host'],
+                    port=db_config['ssh_port'],
+                    username=db_config['ssh_username'],
+                    pkey=pkey,
+                    allow_agent=False,
+                    look_for_keys=False
+                )
+            else:
+                # Use password authentication
+                if not ssh_password:
+                    raise ValueError("SSH password is required when key file is not available")
+                ssh_client.connect(
+                    hostname=db_config['ssh_host'],
+                    port=db_config['ssh_port'],
+                    username=db_config['ssh_username'],
+                    password=ssh_password,
+                    allow_agent=False,
+                    look_for_keys=False
+                )
+        except paramiko.AuthenticationException as e:
+            logger.error(f"SSH authentication failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"SSH connection error: {e}")
+            raise
         
         # Get transport for port forwarding
         transport = ssh_client.get_transport()
@@ -261,23 +302,39 @@ def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        # Load SSH key from project root (always look for "key" file)
+        # Load SSH key from project root (check for both "key" and "key.txt")
         pkey = None
-        project_root = Path(__file__).parent.parent.parent
-        ssh_key_path = project_root / 'key'
+        project_root = Path(__file__).parent.parent
+        # Try both "key.txt" and "key" (key.txt takes precedence)
+        ssh_key_path = None
+        for key_name in ['key.txt', 'key']:
+            potential_path = project_root / key_name
+            if potential_path.exists() and potential_path.is_file():
+                ssh_key_path = potential_path
+                break
+        
         ssh_password = db_config.get('ssh_password', '')
         
+        if ssh_key_path:
+            logger.info(f"Looking for SSH key at: {ssh_key_path}")
+            logger.info(f"Key file exists: {ssh_key_path.exists()}")
+        else:
+            logger.info(f"SSH key file not found in project root ({project_root}), tried: key, key.txt")
+        
         # Try to load key from project root if it exists
-        if ssh_key_path.exists() and ssh_key_path.is_file():
+        if ssh_key_path and ssh_key_path.exists() and ssh_key_path.is_file():
+            logger.info(f"Found SSH key file at {ssh_key_path}, attempting to load...")
             key_errors = []
             for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
                 try:
                     try:
                         pkey = key_class.from_private_key_file(str(ssh_key_path))
+                        logger.info(f"Successfully loaded SSH key as {key_class.__name__}")
                         break
                     except paramiko.ssh_exception.PasswordRequiredException:
                         if ssh_password:
                             pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_password)
+                            logger.info(f"Successfully loaded SSH key as {key_class.__name__} with passphrase")
                             break
                         else:
                             raise
@@ -289,18 +346,43 @@ def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
             if not pkey:
                 logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
                 logger.info("Will attempt SSH connection with password only")
+        else:
+            logger.info(f"SSH key file not found at {ssh_key_path}, will use password authentication only")
         
         # Connect to SSH server
         logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
-        ssh_client.connect(
-            hostname=db_config['ssh_host'],
-            port=db_config['ssh_port'],
-            username=db_config['ssh_username'],
-            pkey=pkey,
-            password=db_config.get('ssh_password'),
-            allow_agent=False,
-            look_for_keys=False
-        )
+        auth_method = 'key' if pkey else 'password'
+        logger.info(f"Using authentication method: {auth_method}")
+        
+        try:
+            if pkey:
+                # Use key-based authentication
+                ssh_client.connect(
+                    hostname=db_config['ssh_host'],
+                    port=db_config['ssh_port'],
+                    username=db_config['ssh_username'],
+                    pkey=pkey,
+                    allow_agent=False,
+                    look_for_keys=False
+                )
+            else:
+                # Use password authentication
+                if not ssh_password:
+                    raise ValueError("SSH password is required when key file is not available")
+                ssh_client.connect(
+                    hostname=db_config['ssh_host'],
+                    port=db_config['ssh_port'],
+                    username=db_config['ssh_username'],
+                    password=ssh_password,
+                    allow_agent=False,
+                    look_for_keys=False
+                )
+        except paramiko.AuthenticationException as e:
+            logger.error(f"SSH authentication failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"SSH connection error: {e}")
+            raise
         
         # Get transport for port forwarding
         transport = ssh_client.get_transport()
@@ -447,7 +529,7 @@ def _create_tables():
             
             # Create sessions table
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS pipeline_sessions (
+                CREATE TABLE IF NOT EXISTS dev.pipeline_sessions (
                     session_id VARCHAR(255) PRIMARY KEY,
                     input_parameters JSONB NOT NULL,
                     status VARCHAR(50) NOT NULL,
@@ -464,13 +546,13 @@ def _create_tables():
             # Create index on created_at for faster queries
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_sessions_created_at 
-                ON pipeline_sessions(created_at DESC)
+                ON dev.pipeline_sessions(created_at DESC)
             """)
             
             # Create index on status
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_sessions_status 
-                ON pipeline_sessions(status)
+                ON dev.pipeline_sessions(status)
             """)
             
             conn.commit()
@@ -530,7 +612,7 @@ def save_session(
             
             # Check if session exists
             cur.execute(
-                "SELECT session_id FROM pipeline_sessions WHERE session_id = %s",
+                "SELECT session_id FROM dev.pipeline_sessions WHERE session_id = %s",
                 (session_id,)
             )
             exists = cur.fetchone()
@@ -559,7 +641,7 @@ def save_session(
             else:
                 # Insert new session
                 cur.execute("""
-                    INSERT INTO pipeline_sessions 
+                    INSERT INTO dev.pipeline_sessions 
                     (session_id, input_parameters, status, progress, current_stage, error_message, result)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (
@@ -633,9 +715,9 @@ def list_sessions(limit: int = 50, status: Optional[str] = None) -> list:
             
             if status:
                 cur.execute("""
-                    SELECT session_id, input_parameters, status, progress, 
+                    SELECT session_id, input_parameters, status, progress,
                            current_stage, created_at, updated_at, completed_at
-                    FROM pipeline_sessions
+                    FROM dev.pipeline_sessions
                     WHERE status = %s
                     ORDER BY created_at DESC
                     LIMIT %s
@@ -674,7 +756,7 @@ def delete_session(session_id: str) -> bool:
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
-                "DELETE FROM pipeline_sessions WHERE session_id = %s",
+                "DELETE FROM dev.pipeline_sessions WHERE session_id = %s",
                 (session_id,)
             )
             conn.commit()
