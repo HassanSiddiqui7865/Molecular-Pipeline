@@ -295,14 +295,24 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
 def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
     """
     Start persistent SSH tunnel to database server using paramiko.
+    Only works in development mode (ENV=dev).
     
     Args:
         db_config: Database configuration dictionary
         
     Returns:
-        Local port number for the tunnel
+        Local port number for the tunnel, or None if not in dev mode
     """
     global _ssh_tunnel, _ssh_local_port
+    
+    # Check environment - only create SSH tunnel in development
+    import os
+    env_mode = os.getenv('ENV', '').lower()
+    is_development = env_mode == 'dev'
+    
+    if not is_development:
+        logger.info("Production mode: Skipping SSH tunnel creation")
+        return None
     
     if not PARAMIKO_AVAILABLE:
         raise ImportError("paramiko not available")
@@ -491,28 +501,38 @@ def init_db_pool():
             logger.warning("Application database not configured, session persistence disabled")
             return
         
-        # Start SSH tunnel if SSH host is configured
-        connect_host = '127.0.0.1'
-        connect_port = db_config['db_port']
+        # Determine connection method based on environment
+        # Development: Use SSH tunnel if configured
+        # Production: Use direct connection (database is local on VM)
+        import os
+        env_mode = os.getenv('ENV', '').lower()
+        is_development = env_mode == 'dev'
         
-        if db_config.get('ssh_host'):
+        if is_development and db_config.get('ssh_host'):
+            # Development mode: Use SSH tunnel
             try:
                 local_port = _start_ssh_tunnel(db_config)
                 if local_port:
                     connect_host = '127.0.0.1'
                     connect_port = local_port
-                    logger.info(f"Using SSH tunnel for database connection (local port: {local_port})")
+                    logger.info(f"Development mode: Using SSH tunnel for database connection (local port: {local_port})")
                 else:
                     logger.warning("SSH tunnel configuration provided but tunnel failed to start, trying direct connection")
+                    connect_host = db_config['db_host']
+                    connect_port = db_config['db_port']
             except Exception as e:
                 logger.error(f"Failed to start SSH tunnel: {e}. Trying direct connection...")
                 # Fall back to direct connection if SSH tunnel fails
                 connect_host = db_config['db_host']
                 connect_port = db_config['db_port']
         else:
-            # Direct connection (no SSH tunnel)
+            # Production mode or no SSH host: Direct connection (database is local)
             connect_host = db_config['db_host']
             connect_port = db_config['db_port']
+            if is_development:
+                logger.info("Development mode: No SSH host configured, using direct connection")
+            else:
+                logger.info("Production mode: Using direct connection to local database")
         
         _db_pool = ThreadedConnectionPool(
             minconn=1,
