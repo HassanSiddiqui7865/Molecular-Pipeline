@@ -220,14 +220,17 @@ def _get_icd_code_name_scraping(code: str) -> str:
     """
     driver = None
     try:
-        # Initialize Chrome driver
+        # Initialize Chrome driver in headless mode
         options = webdriver.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
         
         driver = webdriver.Chrome(options=options)
-        driver.maximize_window()
         
         # Navigate to icd10data.com
         logger.info(f"Opening icd10data.com for ICD code {code}...")

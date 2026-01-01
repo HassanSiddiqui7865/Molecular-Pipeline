@@ -597,5 +597,5 @@ if __name__ == '__main__':
         os.environ['ENV'] = env_mode
         logger.info(f"Running in {env_mode} mode")
     
-    uvicorn.run(app, host='0.0.0.0', port=5000, log_level='info')
+    uvicorn.run(app, host='0.0.0.0', port=7653, log_level='info')
 

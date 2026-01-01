@@ -1,23 +1,29 @@
 version: '3.8'
 
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: molecular_pipeline_db
-    environment:
-      POSTGRES_DB: molecular_pipeline
-      POSTGRES_USER: pipeline_user
-      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-changeme123}
+  molecular-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: molecular-pipeline
     ports:
-      - "5432:5432"
+      - "7653:7653"
+    environment:
+      # Load from .env file (docker-compose will automatically load .env)
+      - ENV=${ENV:-prod}
+    env_file:
+      - .env
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pipeline_user -d molecular_pipeline"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      # Mount output directory to persist results
+      - ./output:/app/output
+      # Mount .env file if you want to edit it without rebuilding
+      - ./.env:/app/.env:ro
+      # Mount key file for SSH (if exists)
+      - ./key:/app/key:ro
     restart: unless-stopped
-
-volumes:
-  postgres_data:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7653/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
