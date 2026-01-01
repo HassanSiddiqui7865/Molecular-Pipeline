@@ -409,11 +409,12 @@ async def progress_stream(session_id: str):
                 # Recreate queue for active session
                 progress_queues[session_id] = queue.Queue()
                 # Send current state from database
-                yield f"data: {json.dumps({
+                state_data = {
                     'stage': session.get('current_stage', 'running'),
                     'message': f"Resumed: {session.get('current_stage', 'running')}",
                     'progress': session.get('progress', 0)
-                })}\n\n"
+                }
+                yield f"data: {json.dumps(state_data)}\n\n"
             else:
                 yield f"data: {json.dumps({'error': 'Invalid or completed session ID'})}\n\n"
                 return
