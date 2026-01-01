@@ -131,15 +131,33 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
     """
     Create and manage SSH tunnel to database server using paramiko.
     Context manager version for temporary tunnels (used by ICD transform node).
+    Only creates SSH tunnel in development mode (ENV=dev).
+    In production mode (ENV=prod), yields None for direct connection.
     
     Args:
         db_config: Database configuration dictionary
         
     Yields:
-        Local port number for the tunnel
+        Local port number for the tunnel (dev mode) or None (prod mode for direct connection)
     """
+    import os
+    env_mode = os.getenv('ENV', '').lower()
+    is_development = env_mode == 'dev'
+    
+    # Production mode: No SSH tunnel, use direct connection
+    if not is_development:
+        logger.info("Production mode: Skipping SSH tunnel, use direct connection")
+        yield None
+        return
+    
+    # Development mode: Create SSH tunnel if configured
     if not PARAMIKO_AVAILABLE:
         raise ImportError("paramiko not available")
+    
+    if not db_config.get('ssh_host'):
+        logger.warning("Development mode: No SSH host configured, use direct connection")
+        yield None
+        return
     
     ssh_client = None
     forward_server = None
