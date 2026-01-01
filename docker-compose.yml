@@ -21,9 +21,6 @@ services:
       # Mount key file for SSH (try key.txt first, fallback to key)
       - ./key.txt:/app/key.txt:ro
       - ./key:/app/key:ro
-    extra_hosts:
-      # Allow container to connect to host machine using host.docker.internal
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7653/"]

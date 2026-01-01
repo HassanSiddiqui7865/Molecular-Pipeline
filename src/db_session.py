@@ -529,32 +529,10 @@ def init_db_pool():
             # Production mode or no SSH host: Direct connection (database is local)
             connect_host = db_config['db_host']
             connect_port = db_config['db_port']
-            
-            # In Docker, if DB_HOST is 'localhost', try to connect to host machine
-            # Check if we're running in Docker
-            if connect_host == 'localhost' or connect_host == '127.0.0.1':
-                # Check if we're in Docker by looking for /.dockerenv or docker in cgroup
-                import os
-                is_docker = os.path.exists('/.dockerenv') or os.path.exists('/proc/self/cgroup') and 'docker' in open('/proc/self/cgroup').read()
-                
-                if is_docker:
-                    # Try host.docker.internal first (works on Docker Desktop)
-                    # Fallback to 172.17.0.1 (Docker bridge gateway on Linux)
-                    import socket
-                    try:
-                        # Try host.docker.internal
-                        socket.gethostbyname('host.docker.internal')
-                        connect_host = 'host.docker.internal'
-                        logger.info("Docker detected: Using host.docker.internal to connect to host database")
-                    except socket.gaierror:
-                        # Fallback to Docker bridge gateway
-                        connect_host = '172.17.0.1'
-                        logger.info("Docker detected: Using 172.17.0.1 (Docker bridge gateway) to connect to host database")
-            
             if is_development:
-                logger.info(f"Development mode: No SSH host configured, using direct connection to {connect_host}:{connect_port}")
+                logger.info("Development mode: No SSH host configured, using direct connection")
             else:
-                logger.info(f"Production mode: Using direct connection to {connect_host}:{connect_port}")
+                logger.info("Production mode: Using direct connection to local database")
         
         _db_pool = ThreadedConnectionPool(
             minconn=1,
