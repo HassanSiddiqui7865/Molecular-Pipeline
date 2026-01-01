@@ -4,20 +4,19 @@ First tries database lookup via SSH, then falls back to scraping icd10data.com.
 """
 import logging
 import time
-import socket
-import threading
 from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-# Try to import SSH library
+# Import SSH tunnel functions from db_session
 try:
-    import paramiko
-    PARAMIKO_AVAILABLE = True
+    from db_session import get_ssh_tunnel, PARAMIKO_AVAILABLE
 except ImportError:
     PARAMIKO_AVAILABLE = False
-    logger.warning("paramiko not available. Install with: pip install paramiko")
+    logger.warning("db_session not available, SSH tunnel disabled")
+    def get_ssh_tunnel(db_config):
+        raise ImportError("SSH tunnel not available")
 
 try:
     import psycopg2
@@ -51,200 +50,6 @@ def _normalize_icd_code(code: str) -> str:
         Normalized ICD code
     """
     return code.strip().upper()
-
-
-def _handler(src, dst):
-    """Forward data from src to dst."""
-    try:
-        while True:
-            data = src.recv(1024)
-            if not data:
-                break
-            dst.send(data)
-    except Exception:
-        pass
-    finally:
-        try:
-            src.close()
-            dst.close()
-        except Exception:
-            pass
-
-
-def _forward_tunnel(local_port, remote_host, remote_port, transport):
-    """Forward connections from local_port to remote_host:remote_port via transport."""
-    class ForwardServer:
-        def __init__(self, remote_host, remote_port, transport):
-            self.server = None
-            self.remote_host = remote_host
-            self.remote_port = remote_port
-            self.transport = transport
-            self.running = False
-            
-        def handle(self, client, addr):
-            try:
-                chan = self.transport.open_channel('direct-tcpip', (self.remote_host, self.remote_port), addr)
-            except Exception as e:
-                logger.warning(f"Error opening channel: {e}")
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                return
-            
-            if chan is None:
-                logger.warning(f"Channel not opened for {self.remote_host}:{self.remote_port}")
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                return
-            
-            # Start forwarding in both directions
-            threading.Thread(target=_handler, args=(client, chan), daemon=True).start()
-            threading.Thread(target=_handler, args=(chan, client), daemon=True).start()
-        
-        def start(self, local_port):
-            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server.bind(('127.0.0.1', local_port))
-            self.server.listen(100)
-            self.running = True
-            
-            while self.running:
-                try:
-                    client, addr = self.server.accept()
-                    threading.Thread(target=self.handle, args=(client, addr), daemon=True).start()
-                except Exception:
-                    break
-        
-        def stop(self):
-            self.running = False
-            if self.server:
-                try:
-                    self.server.close()
-                except Exception:
-                    pass
-    
-    return ForwardServer(remote_host, remote_port, transport)
-
-
-@contextmanager
-def _get_ssh_tunnel(db_config: Dict[str, Any]):
-    """
-    Create and manage SSH tunnel to database server using paramiko.
-    
-    Args:
-        db_config: Database configuration dictionary
-        
-    Yields:
-        Local port number for the tunnel
-    """
-    if not PARAMIKO_AVAILABLE:
-        raise ImportError("paramiko not available")
-    
-    ssh_client = None
-    forward_server = None
-    local_port = None
-    
-    try:
-        # Create SSH client
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        # Load SSH key if provided
-        pkey = None
-        if db_config.get('ssh_key_path'):
-            from pathlib import Path
-            ssh_key_path_str = db_config['ssh_key_path']
-            ssh_key_path = Path(ssh_key_path_str)
-            ssh_key_passphrase = db_config.get('ssh_key_passphrase', '')
-            
-            # If no explicit passphrase is set, use SSH password as passphrase
-            if not ssh_key_passphrase and db_config.get('ssh_password'):
-                ssh_key_passphrase = db_config.get('ssh_password')
-            
-            # If path doesn't exist, try looking for "key" in project root
-            if not ssh_key_path.exists():
-                project_root = Path(__file__).parent.parent.parent
-                potential_key = project_root / 'key'
-                if potential_key.exists() and potential_key.is_file():
-                    ssh_key_path = potential_key
-            
-            # Try different key types
-            if ssh_key_path.exists() and ssh_key_path.is_file():
-                key_errors = []
-                for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
-                    try:
-                        try:
-                            pkey = key_class.from_private_key_file(str(ssh_key_path))
-                            break
-                        except paramiko.ssh_exception.PasswordRequiredException:
-                            if ssh_key_passphrase:
-                                pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_key_passphrase)
-                                break
-                            else:
-                                raise
-                    except paramiko.ssh_exception.PasswordRequiredException:
-                        key_errors.append(f"{key_class.__name__}: requires passphrase")
-                    except Exception as e:
-                        key_errors.append(f"{key_class.__name__}: {e}")
-                
-                if not pkey and not db_config.get('ssh_password'):
-                    raise ValueError(f"Could not load SSH key. Tried: {', '.join(key_errors)}")
-        
-        # Connect to SSH server
-        logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
-        ssh_client.connect(
-            hostname=db_config['ssh_host'],
-            port=db_config['ssh_port'],
-            username=db_config['ssh_username'],
-            pkey=pkey,
-            password=db_config.get('ssh_password'),
-            allow_agent=False,
-            look_for_keys=False
-        )
-        
-        # Get transport for port forwarding
-        transport = ssh_client.get_transport()
-        
-        # Find an available local port
-        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        temp_socket.bind(('127.0.0.1', 0))
-        local_port = temp_socket.getsockname()[1]
-        temp_socket.close()
-        
-        # Start port forwarding
-        forward_server = _forward_tunnel(
-            local_port,
-            db_config['db_host'],
-            db_config['db_port'],
-            transport
-        )
-        
-        # Start forwarding server in a thread
-        forward_thread = threading.Thread(target=forward_server.start, args=(local_port,))
-        forward_thread.daemon = True
-        forward_thread.start()
-        
-        logger.info(f"SSH tunnel established. Local port: {local_port}")
-        
-        yield local_port
-        
-    finally:
-        # Clean up
-        if forward_server:
-            try:
-                forward_server.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping forward server: {e}")
-        
-        if ssh_client:
-            try:
-                ssh_client.close()
-                logger.info("SSH tunnel closed")
-            except Exception as e:
-                logger.warning(f"Error closing SSH connection: {e}")
 
 
 def _query_icd_code_from_db(code: str, cursor) -> Optional[str]:
@@ -349,55 +154,6 @@ def _query_icd_code_from_db(code: str, cursor) -> Optional[str]:
         return None
 
 
-def _get_icd_code_from_database(code: str, db_config: Dict[str, Any]) -> Optional[str]:
-    """
-    Get ICD code name from database via SSH tunnel using two-step query.
-    This is a wrapper that opens a connection for a single code lookup.
-    For multiple codes, use _get_icd_codes_from_database_batch instead.
-    
-    Args:
-        code: Normalized ICD code
-        db_config: Database configuration dictionary
-        
-    Returns:
-        ICD code name/description, or None if not found or error
-    """
-    if not PARAMIKO_AVAILABLE:
-        logger.warning("paramiko not available, cannot query database")
-        return None
-    
-    try:
-        with _get_ssh_tunnel(db_config) as local_port:
-            # Connect to PostgreSQL database through SSH tunnel
-            if not POSTGRESQL_AVAILABLE:
-                logger.warning("psycopg2 not available, cannot query PostgreSQL database")
-                return None
-            
-            connection = psycopg2.connect(
-                host='127.0.0.1',
-                port=local_port,
-                user=db_config['db_username'],
-                password=db_config['db_password'],
-                database=db_config['db_name']
-            )
-            
-            try:
-                # Create cursor with RealDictCursor for dictionary-like results
-                cursor = connection.cursor(cursor_factory=RealDictCursor)
-                
-                try:
-                    return _query_icd_code_from_db(code, cursor)
-                finally:
-                    cursor.close()
-                        
-            finally:
-                connection.close()
-                
-    except Exception as e:
-        logger.warning(f"Error querying database for ICD code {code}: {e}")
-        return None
-
-
 @contextmanager
 def _get_db_connection_with_tunnel(db_config: Dict[str, Any]):
     """
@@ -419,8 +175,8 @@ def _get_db_connection_with_tunnel(db_config: Dict[str, Any]):
     connection = None
     cursor = None
     
-    # Use nested context manager for SSH tunnel
-    with _get_ssh_tunnel(db_config) as local_port:
+    # Use nested context manager for SSH tunnel (from db_session)
+    with get_ssh_tunnel(db_config) as local_port:
         try:
             # Connect to PostgreSQL database through SSH tunnel
             connection = psycopg2.connect(
@@ -552,35 +308,6 @@ def _get_icd_code_name_scraping(code: str) -> str:
                 pass
 
 
-def _get_icd_code_name(code: str, db_config: Optional[Dict[str, Any]] = None) -> str:
-    """
-    Get ICD code name, first trying database, then falling back to scraping.
-    
-    Args:
-        code: Normalized ICD code
-        db_config: Database configuration dictionary (optional)
-        
-    Returns:
-        ICD code name/description, or original code if not found
-    """
-    # Try database first if config is provided
-    if db_config and db_config.get('ssh_host'):
-        try:
-            name = _get_icd_code_from_database(code, db_config)
-            if name:
-                return name
-            logger.info(f"ICD code {code} not found in database, falling back to scraping")
-        except Exception as e:
-            logger.warning(f"Database lookup failed for {code}: {e}, falling back to scraping")
-    
-    # Fallback to scraping
-    if SELENIUM_AVAILABLE:
-        return _get_icd_code_name_scraping(code)
-    else:
-        logger.warning("Selenium not available, cannot scrape. Returning original code.")
-        return code
-
-
 def _transform_icd_codes(severity_codes: List[str], db_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Transform ICD codes to human-readable names.
@@ -701,11 +428,21 @@ def icd_transform_node(state: Dict[str, Any]) -> Dict[str, Any]:
         Updated state with transformed ICD codes
     """
     try:
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
+        # Emit progress for ICD transform start
+        if progress_callback:
+            progress_callback('icd_transform', 0, 'Transforming ICD codes...')
+        
         input_params = state.get('input_parameters', {})
         severity_codes = input_params.get('severity_codes', [])
         
         if not severity_codes or not isinstance(severity_codes, list) or len(severity_codes) == 0:
             logger.warning("No severity codes found in input parameters")
+            if progress_callback:
+                progress_callback('icd_transform', 100, 'No ICD codes to transform')
             return {
                 'icd_transformation': {
                     'original_codes': [],
@@ -713,6 +450,10 @@ def icd_transform_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     'severity_codes_transformed': ''
                 }
             }
+        
+        # Emit progress for database lookup
+        if progress_callback:
+            progress_callback('icd_transform', 30, f'Looking up {len(severity_codes)} ICD codes...')
         
         # Get database config if available
         from config import get_database_config
@@ -729,6 +470,10 @@ def icd_transform_node(state: Dict[str, Any]) -> Dict[str, Any]:
         transformation_result = _transform_icd_codes(severity_codes, db_config)
         
         logger.info(f"Transformed {len(transformation_result['original_codes'])} ICD codes: {transformation_result['severity_codes_transformed']}")
+        
+        # Emit progress for ICD transform complete
+        if progress_callback:
+            progress_callback('icd_transform', 100, f'Transformed {len(transformation_result["original_codes"])} ICD codes')
         
         return {
             'icd_transformation': transformation_result

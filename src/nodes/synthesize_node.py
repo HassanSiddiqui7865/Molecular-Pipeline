@@ -4,7 +4,6 @@ Uses LlamaIndex for structured extraction.
 """
 import logging
 import json
-import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
@@ -138,20 +137,8 @@ def _unify_antibiotic_group_with_llm(
             if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
                 unified[key] = None
         
-        # CRITICAL FALLBACK: If LLM returned null for dose_duration but entries have it, use the most complete one
-        if unified.get('dose_duration') is None:
-            available_dose_durations = [e.get('dose_duration') for e in entries if e.get('dose_duration')]
-            if available_dose_durations:
-                # Prioritize complete ones (with duration), then incomplete ones
-                complete_ones = [d for d in available_dose_durations if 'for' in d.lower() or 'week' in d.lower() or 'day' in d.lower()]
-                if complete_ones:
-                    # Use the most comprehensive complete one
-                    unified['dose_duration'] = max(complete_ones, key=lambda x: len(x))
-                    logger.info(f"Fallback: Used dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
-                else:
-                    # Use the longest incomplete one
-                    unified['dose_duration'] = max(available_dose_durations, key=lambda x: len(x))
-                    logger.info(f"Fallback: Used incomplete dose_duration from entries for {antibiotic_name}: {unified['dose_duration']}")
+        # Trust LLM's decision completely - if it returned null for dose_duration, that's the correct decision
+        # The LLM follows the prompt which instructs it to set dose_duration to null if incomplete
         
         return unified
         

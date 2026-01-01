@@ -165,18 +165,11 @@ def run_pipeline_with_progress(session_id: str, input_params: dict):
         # Run graph - progress will be tracked by nodes through progress_callback
         final_state = graph.invoke(initial_state)
         
-        # Emit progress updates based on state
-        if 'icd_transformation' in final_state:
-            emit_progress(session_id, 'icd_transform', 'ICD codes transformed', 20)
-        if 'search_results' in final_state:
-            emit_progress(session_id, 'search', 'Search completed', 30)
-        if 'source_results' in final_state:
-            emit_progress(session_id, 'extract', 'Extraction completed', 50)
-            emit_progress(session_id, 'parse', 'Parsing completed', 60)
-            emit_progress(session_id, 'rank', 'Ranking completed', 70)
+        # Nodes report their own progress, so we don't need duplicate updates here
+        # Just ensure final completion is reported
         if 'result' in final_state:
-            emit_progress(session_id, 'synthesize', 'Synthesis completed', 85)
-            emit_progress(session_id, 'enrichment', 'Enrichment completed', 95)
+            # Final completion will be handled by emit_progress below
+            pass
         
         # Prepare output
         output_data = {
@@ -235,7 +228,7 @@ class PipelineInput(BaseModel):
     resistant_genes: list
     severity_codes: list
     age: Optional[int] = None
-    sample: Optional[str] = None
+    panel: Optional[str] = None
     systemic: Optional[bool] = None
     allergy: Optional[List[str]] = None
 
@@ -586,5 +579,23 @@ async def download_pdf_by_session(session_id: str):
 
 if __name__ == '__main__':
     import uvicorn
+    import sys
+    
+    # Check for environment flag: env.dev for development, env for production
+    env_mode = None
+    if len(sys.argv) > 1:
+        if 'env.dev' in sys.argv:
+            env_mode = 'dev'
+            sys.argv.remove('env.dev')
+        elif 'env' in sys.argv:
+            env_mode = 'prod'
+            sys.argv.remove('env')
+    
+    # Set ENV environment variable before loading config
+    if env_mode:
+        import os
+        os.environ['ENV'] = env_mode
+        logger.info(f"Running in {env_mode} mode")
+    
     uvicorn.run(app, host='0.0.0.0', port=5000, log_level='info')
 

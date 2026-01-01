@@ -392,34 +392,163 @@ def _validate_antibiotic_match(
         return True
 
 
-def _get_reference_url_from_dosage_url(dosage_url: str) -> Optional[str]:
+def _search_drugs_com_main_page(antibiotic_name: str, driver: Any) -> Optional[str]:
     """
-    Construct reference URL from drugs.com dosage URL.
-    Converts dosage URL to main drug page URL.
-    
-    Example:
-        Input:  https://www.drugs.com/dosage/clindamycin.html
-        Output: https://www.drugs.com/clindamycin.html
+    Search DuckDuckGo for the main drugs.com page for an antibiotic.
+    Searches for "{antibiotic_name} drugs.com" and returns the first drugs.com link found.
     
     Args:
-        dosage_url: The drugs.com dosage URL
+        antibiotic_name: Name of the antibiotic
+        driver: Selenium WebDriver instance
         
     Returns:
-        The reference URL, or None if URL format is invalid
+        URL of first drugs.com result (main page, not dosage), or None if not found
     """
+    if not driver:
+        return None
+    
     try:
-        # Extract the drug name from the dosage URL
-        # Pattern: https://www.drugs.com/dosage/{drug_name}.html
-        if '/dosage/' in dosage_url:
-            # Replace /dosage/ with / to get the main drug page
-            reference_url = dosage_url.replace('/dosage/', '/')
-            logger.debug(f"Constructed reference URL from dosage URL: {reference_url}")
-            return reference_url
-        else:
-            logger.warning(f"Dosage URL format unexpected: {dosage_url}")
+        search_query = f"{antibiotic_name} drugs.com"
+        logger.info(f"Searching DuckDuckGo for main drugs.com page: {search_query}...")
+        
+        # Navigate to DuckDuckGo
+        max_retries = 3
+        retry_delay = 2.0
+        navigation_success = False
+        for attempt in range(max_retries):
+            try:
+                driver.get("https://duckduckgo.com/")
+                navigation_success = True
+                break
+            except Exception as e:
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    logger.debug(f"DuckDuckGo page load timeout (attempt {attempt + 1}/{max_retries}), continuing...")
+                    navigation_success = True
+                    break
+                elif attempt < max_retries - 1:
+                    logger.warning(f"DuckDuckGo navigation failed (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.warning(f"DuckDuckGo navigation failed after {max_retries} attempts: {e}")
+                    return None
+        
+        if not navigation_success:
             return None
+        
+        # Wait for search box
+        search_box = None
+        for attempt in range(max_retries):
+            try:
+                search_box = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, "searchbox_input"))
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Search box not found (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    try:
+                        search_box = driver.find_element(By.CSS_SELECTOR, "input[name='q']")
+                        break
+                    except:
+                        logger.warning(f"Search box not found after {max_retries} attempts: {e}")
+                        return None
+        
+        if not search_box:
+            return None
+        
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", search_box)
+            time.sleep(random.uniform(0.3, 0.7))
+            
+            search_box.click()
+            time.sleep(random.uniform(0.2, 0.5))
+            
+            search_box.clear()
+            for char in search_query:
+                search_box.send_keys(char)
+                time.sleep(random.uniform(0.05, 0.15))
+            
+            time.sleep(random.uniform(0.5, 1.2))
+            search_box.send_keys(Keys.RETURN)
+            time.sleep(random.uniform(2.5, 4.0))
+            
+        except Exception as e:
+            logger.warning(f"Error during search interaction: {e}, trying direct URL as fallback")
+            encoded_query = quote_plus(search_query)
+            duckduckgo_url = f"https://duckduckgo.com/?q={encoded_query}"
+            try:
+                driver.get(duckduckgo_url)
+            except Exception as nav_error:
+                if "timeout" not in str(nav_error).lower() and "timed out" not in str(nav_error).lower():
+                    logger.warning(f"Fallback navigation failed: {nav_error}")
+        
+        try:
+            time.sleep(3)
+            
+            result_selectors = [
+                "a[data-testid='result-title-a']",
+                "a.result__a",
+                "a[href*='drugs.com']",
+                "div.result a",
+                "li[data-layout='organic'] a"
+            ]
+            
+            found_urls = []
+            for selector in result_selectors:
+                try:
+                    links = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for link in links:
+                        try:
+                            href = link.get_attribute('href')
+                            if not href:
+                                continue
+                            
+                            href_lower = href.lower()
+                            
+                            if (href.startswith('http') and 
+                                'drugs.com' in href_lower and 
+                                'duckduckgo' not in href_lower):
+                                
+                                try:
+                                    from urllib.parse import urlparse
+                                    parsed = urlparse(href)
+                                    domain = parsed.netloc.lower()
+                                    
+                                    if 'drugs.com' in domain:
+                                        url = href.split('?')[0] if '?' in href else href
+                                        
+                                        if ('drugs.com' in url.lower() and
+                                            'duckduckgo' not in url.lower() and
+                                            url.startswith('http')):
+                                            found_urls.append(url)
+                                            logger.info(f"Found drugs.com main page URL for {antibiotic_name}: {url}")
+                                            return url
+                                except Exception as e:
+                                    logger.debug(f"Error parsing URL {href}: {e}")
+                                    continue
+                        except Exception as e:
+                            logger.debug(f"Error processing link: {e}")
+                            continue
+                            
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
+            
+            if found_urls:
+                logger.warning(f"Found {len(found_urls)} drugs.com URLs but none matched criteria: {found_urls[:3]}")
+            else:
+                logger.warning(f"No drugs.com URLs found for {antibiotic_name}")
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error searching for drugs.com main page: {e}")
+            return None
+            
     except Exception as e:
-        logger.debug(f"Could not construct reference URL from dosage URL: {e}")
+        logger.warning(f"Error in _search_drugs_com_main_page: {e}")
         return None
 
 
@@ -457,24 +586,24 @@ def _extract_references_from_page(driver: Any) -> List[str]:
     return references
 
 
-def _extract_references_from_reference_page(dosage_url: str, driver: Any) -> List[str]:
+def _extract_references_from_reference_page(antibiotic_name: str, driver: Any) -> List[str]:
     """
-    Extract references by visiting the main drug page (constructed from dosage URL).
+    Extract references by searching DuckDuckGo for the main drugs.com page and extracting references.
     If references are not found, returns empty list and continues without error.
     
     Args:
-        dosage_url: The drugs.com dosage URL (e.g., https://www.drugs.com/dosage/clindamycin.html)
+        antibiotic_name: Name of the antibiotic to search for
         driver: Selenium WebDriver instance
-        
+    
     Returns:
         List of reference URLs extracted from div.ddc-reference-list (empty list if not found)
     """
     references = []
     try:
-        # Construct the reference URL from the dosage URL
-        reference_url = _get_reference_url_from_dosage_url(dosage_url)
+        # Search DuckDuckGo for the main drugs.com page
+        reference_url = _search_drugs_com_main_page(antibiotic_name, driver)
         if not reference_url:
-            logger.debug(f"Could not construct reference URL from {dosage_url} - continuing without references")
+            logger.debug(f"Could not find drugs.com main page for {antibiotic_name} - continuing without references")
             return []
         
         logger.info(f"Extracting references from {reference_url}...")
@@ -505,14 +634,15 @@ def _extract_references_from_reference_page(dosage_url: str, driver: Any) -> Lis
     return references
 
 
-def _scrape_drugs_com_page(url: str, driver: Any) -> tuple[Optional[str], List[str]]:
+def _scrape_drugs_com_page(url: str, antibiotic_name: str, driver: Any) -> tuple[Optional[str], List[str]]:
     """
     Scrape content from drugs.com page using Selenium.
     
     Args:
         url: URL of the drugs.com page
+        antibiotic_name: Name of the antibiotic (for reference extraction)
         driver: Selenium WebDriver instance
-        
+    
     Returns:
         Tuple of (page_content, references_list) or (None, []) if error
     """
@@ -594,8 +724,8 @@ def _scrape_drugs_com_page(url: str, driver: Any) -> tuple[Optional[str], List[s
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = ' '.join(chunk for chunk in chunks if chunk)
         
-        # Extract references from the main drug page
-        references = _extract_references_from_reference_page(url, driver)
+        # Extract references by searching for main drugs.com page
+        references = _extract_references_from_reference_page(antibiotic_name, driver)
         
         logger.info(f"Extracted {len(text)} characters from #content element, found {len(references)} references")
         return text, references
@@ -754,10 +884,11 @@ def _extract_fields_with_llamaindex(
         existing_data_context = ""
         if existing_data:
             existing_fields = []
+            # Emphasize route_of_administration if present - it's critical for dose_duration extraction
+            if existing_data.get('route_of_administration'):
+                existing_fields.append(f"route_of_administration={existing_data['route_of_administration']} [CRITICAL: Extract dose_duration matching this exact route]")
             if existing_data.get('dose_duration'):
                 existing_fields.append(f"dose_duration={existing_data['dose_duration']}")
-            if existing_data.get('route_of_administration'):
-                existing_fields.append(f"route_of_administration={existing_data['route_of_administration']}")
             if existing_data.get('coverage_for'):
                 existing_fields.append(f"coverage_for={existing_data['coverage_for']}")
             if existing_data.get('renal_adjustment'):
@@ -1018,7 +1149,7 @@ def _scrape_antibiotic_page(
                 return (category, idx, None, missing_fields, True, 0, [])  # validation_failed=True
             
             logger.info(f"[Thread] Navigating directly to {drugs_com_url}")
-            page_content, references = _scrape_drugs_com_page(drugs_com_url, driver)
+            page_content, references = _scrape_drugs_com_page(drugs_com_url, medical_name, driver)
             
             if page_content:
                 # Calculate number of chunks
@@ -1183,7 +1314,11 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     logger.info(f"  ✓ Added {len(references)} references to {medical_name}")
                 
                 # Step 2: Extract fields using LlamaIndex
-                logger.info(f"  [2/2] Extracting fields for {medical_name}...")
+                route_info = antibiotic.get('route_of_administration', 'not specified')
+                if 'dose_duration' in missing_fields and route_info and route_info != 'not specified':
+                    logger.info(f"  [2/2] Extracting fields for {medical_name} (route: {route_info} - will extract dose_duration matching this route)...")
+                else:
+                    logger.info(f"  [2/2] Extracting fields for {medical_name}...")
                 extracted_fields = _extract_fields_with_llamaindex(
                     page_content=page_content,
                     medical_name=medical_name,
@@ -1202,14 +1337,12 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if field in extracted_fields and extracted_fields[field]:
                         antibiotic[field] = extracted_fields[field]
                         updated = True
-                        # Check if this is a required field (for completeness)
-                        # All fields are required for is_complete
+                        # Check if this is a required field
                         if field in ['coverage_for', 'dose_duration', 'route_of_administration', 'renal_adjustment', 'general_considerations']:
                             required_fields_updated = True
                         logger.info(f"  ✓ Updated {field} for {medical_name}")
                 
-                
-                # Fill missing fields with defaults if not extracted
+                # Set defaults only if not extracted from enrichment
                 if not antibiotic.get('renal_adjustment'):
                     antibiotic['renal_adjustment'] = "No Renal Adjustment"
                     logger.info(f"  ✓ Set default renal_adjustment for {medical_name}: No Renal Adjustment")
@@ -1330,7 +1463,11 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         
                         medical_name = antibiotic.get('medical_name', 'unknown')
                         try:
-                            logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks)...")
+                            route_info = antibiotic.get('route_of_administration', 'not specified')
+                            if 'dose_duration' in missing_fields and route_info and route_info != 'not specified':
+                                logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks, route: {route_info} - will extract dose_duration matching this route)...")
+                            else:
+                                logger.info(f"Processing {medical_name} (alternative_antibiotic, {num_chunks} chunks)...")
                             
                             # Extract fields using LlamaIndex
                             extracted_fields = _extract_fields_with_llamaindex(
@@ -1427,17 +1564,16 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
             antibiotics = therapy_plan.get(category, [])
             if isinstance(antibiotics, list):
                 for ab in antibiotics:
-                    # Fill missing renal_adjustment
+                    # Set defaults only if not extracted from enrichment
                     if not ab.get('renal_adjustment'):
                         ab['renal_adjustment'] = "No Renal Adjustment"
                         logger.info(f"  ✓ Set default renal_adjustment for {ab.get('medical_name', 'unknown')}: No Renal Adjustment")
                     
-                    # Fill missing general_considerations
                     if not ab.get('general_considerations'):
                         ab['general_considerations'] = "Standard precautions apply; monitor for adverse effects"
                         logger.info(f"  ✓ Set default general_considerations for {ab.get('medical_name', 'unknown')}")
                     
-                    # Recalculate is_complete after filling defaults
+                    # Recalculate is_complete
                     ab['is_complete'] = (
                         ab.get('medical_name') is not None and
                         ab.get('coverage_for') is not None and

@@ -16,7 +16,7 @@ const API_BASE_URL = (() => {
     return `${window.location.protocol}//${window.location.hostname}:5000`;
 })();
 
-// Example JSON input
+// Example JSON input (panel will be added from dropdown)
 const exampleInput = {
     "pathogens": [
         {
@@ -39,12 +39,12 @@ const exampleInput = {
         "A41.81"
     ],
     "age": 32,
-    "sample": "Blood",
     "systemic": true
 };
 
 // DOM elements
 const jsonInput = document.getElementById('jsonInput');
+const panelSelect = document.getElementById('panelSelect');
 const loadExampleBtn = document.getElementById('loadExample');
 const runPipelineBtn = document.getElementById('runPipeline');
 const progressSection = document.getElementById('progressSection');
@@ -62,11 +62,20 @@ const sessionsTableBody = document.getElementById('sessionsTableBody');
 // Load example
 loadExampleBtn.addEventListener('click', () => {
     jsonInput.value = JSON.stringify(exampleInput, null, 2);
+    // Set default panel to Blood when loading example
+    panelSelect.value = 'Blood';
     addLog('Example JSON loaded', 'success');
 });
 
 // Run pipeline
 runPipelineBtn.addEventListener('click', async () => {
+    // Validate panel selection
+    const selectedPanel = panelSelect.value;
+    if (!selectedPanel) {
+        alert('Please select a panel from the dropdown.');
+        return;
+    }
+    
     // Validate JSON first
     let inputData;
     try {
@@ -75,6 +84,9 @@ runPipelineBtn.addEventListener('click', async () => {
         alert('Invalid JSON. Please fix the JSON format.');
         return;
     }
+    
+    // Add/override panel from dropdown
+    inputData.panel = selectedPanel;
 
     // Disable button
     runPipelineBtn.disabled = true;
@@ -205,62 +217,8 @@ function addLog(message, type = '') {
 // Display results
 function displayResults(result) {
     resultSection.style.display = 'block';
-
-    const therapyPlan = result.result?.antibiotic_therapy_plan || {};
-    const firstChoice = therapyPlan.first_choice || [];
-    const secondChoice = therapyPlan.second_choice || [];
-    const alternative = therapyPlan.alternative_antibiotic || [];
-    const resistanceGenes = result.result?.pharmacist_analysis_on_resistant_gene || [];
-
-    let html = '<div class="result-summary">';
-    html += `<div class="summary-card"><h3>First Choice</h3><div class="count">${firstChoice.length}</div></div>`;
-    html += `<div class="summary-card"><h3>Second Choice</h3><div class="count">${secondChoice.length}</div></div>`;
-    html += `<div class="summary-card"><h3>Alternative</h3><div class="count">${alternative.length}</div></div>`;
-    html += `<div class="summary-card"><h3>Resistance Genes</h3><div class="count">${resistanceGenes.length}</div></div>`;
-    html += '</div>';
-
-    // Display antibiotics
-    if (firstChoice.length > 0) {
-        html += '<h3>First Choice Antibiotics</h3>';
-        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
-        firstChoice.forEach((ab, idx) => {
-            const firstLineBadge = idx === 0 ? '<span class="first-line-badge" style="display: inline-block !important; margin-left: 0 !important; margin-right: 12px !important; text-align: center !important;">First Line</span>' : '';
-            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
-                <div class="antibiotic-header" style="text-align: left !important; margin-left: 0 !important; margin-bottom: 8px !important; display: block !important; width: 100% !important;">
-                    ${firstLineBadge}
-                    <strong class="antibiotic-name" style="text-align: left !important; margin-left: 0 !important; display: inline-block !important; vertical-align: middle !important;">${ab.medical_name}</strong>
-                </div>
-                <small style="text-align: left !important; margin-left: 0 !important; margin-top: 8px !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
-            </li>`;
-        });
-        html += '</ul>';
-    }
-
-    if (secondChoice.length > 0) {
-        html += '<h3>Second Choice Antibiotics</h3>';
-        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
-        secondChoice.forEach(ab => {
-            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
-                <strong style="text-align: left !important; margin-left: 0 !important; display: block !important; margin-bottom: 4px !important;">${ab.medical_name}</strong>
-                <small style="text-align: left !important; margin-left: 0 !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
-            </li>`;
-        });
-        html += '</ul>';
-    }
-
-    if (alternative.length > 0) {
-        html += '<h3>Alternative Antibiotics</h3>';
-        html += '<ul style="text-align: left !important; margin-left: 0 !important; padding-left: 0 !important; width: 100% !important;">';
-        alternative.forEach(ab => {
-            html += `<li style="text-align: left !important; margin: 8px 0 !important; margin-left: 0 !important; padding: 32px 24px !important; min-height: 100px !important; display: block !important; width: 100% !important; box-sizing: border-box !important;">
-                <strong style="text-align: left !important; margin-left: 0 !important; display: block !important; margin-bottom: 4px !important;">${ab.medical_name}</strong>
-                <small style="text-align: left !important; margin-left: 0 !important; display: block !important; width: 100% !important;">${ab.coverage_for || 'N/A'} | ${ab.route_of_administration || 'N/A'}</small>
-            </li>`;
-        });
-        html += '</ul>';
-    }
-
-    resultContent.innerHTML = html;
+    // Don't display any antibiotic information - only show download buttons
+    resultContent.innerHTML = '';
 }
 
 // Download JSON

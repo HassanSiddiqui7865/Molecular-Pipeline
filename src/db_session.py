@@ -1,14 +1,25 @@
 """
 Database session management for persistent session storage.
-Uses a separate database from the ICD codes database.
+Uses the same database as the ICD codes database with SSH tunnel support.
 """
 import json
 import logging
+import socket
+import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
 from contextlib import contextmanager
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Try to import SSH library
+try:
+    import paramiko
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    PARAMIKO_AVAILABLE = False
+    logger.warning("paramiko not available. Install with: pip install paramiko")
 
 # Try to import PostgreSQL library
 try:
@@ -22,32 +33,350 @@ except ImportError:
 
 # Connection pool for the application database
 _db_pool = None
+_ssh_tunnel = None
+_ssh_local_port = None
 
 
 def get_app_db_config() -> Dict[str, Any]:
     """
     Get application database configuration from environment variables.
-    This is separate from the ICD codes database.
+    Uses the same database configuration as ICD codes database.
     
     Returns:
-        Dictionary with database configuration
+        Dictionary with database configuration including SSH tunnel settings
     """
-    import os
-    from config import _ensure_env_loaded
-    _ensure_env_loaded()
+    from config import get_database_config
+    # Use the same database config as ICD codes
+    return get_database_config()
+
+
+def _handler(src, dst):
+    """Forward data from src to dst."""
+    try:
+        while True:
+            data = src.recv(1024)
+            if not data:
+                break
+            dst.send(data)
+    except Exception:
+        pass
+    finally:
+        try:
+            src.close()
+            dst.close()
+        except Exception:
+            pass
+
+
+def _forward_tunnel(local_port, remote_host, remote_port, transport):
+    """Forward connections from local_port to remote_host:remote_port via transport."""
+    class ForwardServer:
+        def __init__(self, remote_host, remote_port, transport):
+            self.server = None
+            self.remote_host = remote_host
+            self.remote_port = remote_port
+            self.transport = transport
+            self.running = False
+            
+        def handle(self, client, addr):
+            try:
+                chan = self.transport.open_channel('direct-tcpip', (self.remote_host, self.remote_port), addr)
+            except Exception as e:
+                logger.warning(f"Error opening channel: {e}")
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return
+            
+            if chan is None:
+                logger.warning(f"Channel not opened for {self.remote_host}:{self.remote_port}")
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return
+            
+            # Start forwarding in both directions
+            threading.Thread(target=_handler, args=(client, chan), daemon=True).start()
+            threading.Thread(target=_handler, args=(chan, client), daemon=True).start()
+        
+        def start(self, local_port):
+            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server.bind(('127.0.0.1', local_port))
+            self.server.listen(100)
+            self.running = True
+            
+            while self.running:
+                try:
+                    client, addr = self.server.accept()
+                    threading.Thread(target=self.handle, args=(client, addr), daemon=True).start()
+                except Exception:
+                    break
+        
+        def stop(self):
+            self.running = False
+            if self.server:
+                try:
+                    self.server.close()
+                except Exception:
+                    pass
     
-    return {
-        'db_host': os.getenv('APP_DB_HOST', 'localhost'),
-        'db_port': int(os.getenv('APP_DB_PORT', '5432')),
-        'db_name': os.getenv('APP_DB_NAME', 'molecular_pipeline'),
-        'db_username': os.getenv('APP_DB_USERNAME', ''),
-        'db_password': os.getenv('APP_DB_PASSWORD', ''),
-    }
+    return ForwardServer(remote_host, remote_port, transport)
+
+
+@contextmanager
+def get_ssh_tunnel(db_config: Dict[str, Any]):
+    """
+    Create and manage SSH tunnel to database server using paramiko.
+    Context manager version for temporary tunnels (used by ICD transform node).
+    
+    Args:
+        db_config: Database configuration dictionary
+        
+    Yields:
+        Local port number for the tunnel
+    """
+    if not PARAMIKO_AVAILABLE:
+        raise ImportError("paramiko not available")
+    
+    ssh_client = None
+    forward_server = None
+    local_port = None
+    
+    try:
+        # Create SSH client
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Load SSH key from project root (always look for "key" file)
+        pkey = None
+        project_root = Path(__file__).parent.parent.parent
+        ssh_key_path = project_root / 'key'
+        ssh_password = db_config.get('ssh_password', '')
+        
+        # Try to load key from project root if it exists
+        if ssh_key_path.exists() and ssh_key_path.is_file():
+            key_errors = []
+            for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
+                try:
+                    try:
+                        pkey = key_class.from_private_key_file(str(ssh_key_path))
+                        break
+                    except paramiko.ssh_exception.PasswordRequiredException:
+                        if ssh_password:
+                            pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_password)
+                            break
+                        else:
+                            raise
+                except paramiko.ssh_exception.PasswordRequiredException:
+                    key_errors.append(f"{key_class.__name__}: requires passphrase")
+                except Exception as e:
+                    key_errors.append(f"{key_class.__name__}: {e}")
+            
+            if not pkey:
+                logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
+                logger.info("Will attempt SSH connection with password only")
+        
+        # Connect to SSH server
+        logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
+        ssh_client.connect(
+            hostname=db_config['ssh_host'],
+            port=db_config['ssh_port'],
+            username=db_config['ssh_username'],
+            pkey=pkey,
+            password=db_config.get('ssh_password'),
+            allow_agent=False,
+            look_for_keys=False
+        )
+        
+        # Get transport for port forwarding
+        transport = ssh_client.get_transport()
+        
+        # Find an available local port
+        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        temp_socket.bind(('127.0.0.1', 0))
+        local_port = temp_socket.getsockname()[1]
+        temp_socket.close()
+        
+        # Start port forwarding
+        forward_server = _forward_tunnel(
+            local_port,
+            db_config['db_host'],
+            db_config['db_port'],
+            transport
+        )
+        
+        # Start forwarding server in a thread
+        forward_thread = threading.Thread(target=forward_server.start, args=(local_port,))
+        forward_thread.daemon = True
+        forward_thread.start()
+        
+        logger.info(f"SSH tunnel established. Local port: {local_port}")
+        
+        yield local_port
+        
+    finally:
+        # Clean up
+        if forward_server:
+            try:
+                forward_server.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping forward server: {e}")
+        
+        if ssh_client:
+            try:
+                ssh_client.close()
+                logger.info("SSH tunnel closed")
+            except Exception as e:
+                logger.warning(f"Error closing SSH connection: {e}")
+
+
+def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
+    """
+    Start persistent SSH tunnel to database server using paramiko.
+    
+    Args:
+        db_config: Database configuration dictionary
+        
+    Returns:
+        Local port number for the tunnel
+    """
+    global _ssh_tunnel, _ssh_local_port
+    
+    if not PARAMIKO_AVAILABLE:
+        raise ImportError("paramiko not available")
+    
+    if not db_config.get('ssh_host'):
+        # No SSH tunnel needed, return None to indicate direct connection
+        return None
+    
+    ssh_client = None
+    forward_server = None
+    local_port = None
+    
+    try:
+        # Create SSH client
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Load SSH key from project root (always look for "key" file)
+        pkey = None
+        project_root = Path(__file__).parent.parent.parent
+        ssh_key_path = project_root / 'key'
+        ssh_password = db_config.get('ssh_password', '')
+        
+        # Try to load key from project root if it exists
+        if ssh_key_path.exists() and ssh_key_path.is_file():
+            key_errors = []
+            for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
+                try:
+                    try:
+                        pkey = key_class.from_private_key_file(str(ssh_key_path))
+                        break
+                    except paramiko.ssh_exception.PasswordRequiredException:
+                        if ssh_password:
+                            pkey = key_class.from_private_key_file(str(ssh_key_path), password=ssh_password)
+                            break
+                        else:
+                            raise
+                except paramiko.ssh_exception.PasswordRequiredException:
+                    key_errors.append(f"{key_class.__name__}: requires passphrase")
+                except Exception as e:
+                    key_errors.append(f"{key_class.__name__}: {e}")
+            
+            if not pkey:
+                logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
+                logger.info("Will attempt SSH connection with password only")
+        
+        # Connect to SSH server
+        logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
+        ssh_client.connect(
+            hostname=db_config['ssh_host'],
+            port=db_config['ssh_port'],
+            username=db_config['ssh_username'],
+            pkey=pkey,
+            password=db_config.get('ssh_password'),
+            allow_agent=False,
+            look_for_keys=False
+        )
+        
+        # Get transport for port forwarding
+        transport = ssh_client.get_transport()
+        
+        # Find an available local port
+        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        temp_socket.bind(('127.0.0.1', 0))
+        local_port = temp_socket.getsockname()[1]
+        temp_socket.close()
+        
+        # Start port forwarding
+        forward_server = _forward_tunnel(
+            local_port,
+            db_config['db_host'],
+            db_config['db_port'],
+            transport
+        )
+        
+        # Start forwarding server in a thread
+        forward_thread = threading.Thread(target=forward_server.start, args=(local_port,))
+        forward_thread.daemon = True
+        forward_thread.start()
+        
+        logger.info(f"SSH tunnel established. Local port: {local_port}")
+        
+        # Store references to keep tunnel alive
+        _ssh_tunnel = {
+            'ssh_client': ssh_client,
+            'forward_server': forward_server,
+            'forward_thread': forward_thread
+        }
+        _ssh_local_port = local_port
+        
+        return local_port
+        
+    except Exception as e:
+        # Clean up on error
+        if forward_server:
+            try:
+                forward_server.stop()
+            except Exception:
+                pass
+        if ssh_client:
+            try:
+                ssh_client.close()
+            except Exception:
+                pass
+        raise
+
+
+def _stop_ssh_tunnel():
+    """Stop the persistent SSH tunnel."""
+    global _ssh_tunnel, _ssh_local_port
+    
+    if _ssh_tunnel:
+        try:
+            if _ssh_tunnel.get('forward_server'):
+                _ssh_tunnel['forward_server'].stop()
+        except Exception as e:
+            logger.warning(f"Error stopping forward server: {e}")
+        
+        try:
+            if _ssh_tunnel.get('ssh_client'):
+                _ssh_tunnel['ssh_client'].close()
+                logger.info("SSH tunnel closed")
+        except Exception as e:
+            logger.warning(f"Error closing SSH connection: {e}")
+        
+        _ssh_tunnel = None
+        _ssh_local_port = None
 
 
 def init_db_pool():
-    """Initialize database connection pool."""
-    global _db_pool
+    """Initialize database connection pool with SSH tunnel support if needed."""
+    global _db_pool, _ssh_local_port
+    
     if _db_pool is not None:
         return
     
@@ -62,16 +391,39 @@ def init_db_pool():
             logger.warning("Application database not configured, session persistence disabled")
             return
         
+        # Start SSH tunnel if SSH host is configured
+        connect_host = '127.0.0.1'
+        connect_port = db_config['db_port']
+        
+        if db_config.get('ssh_host'):
+            try:
+                local_port = _start_ssh_tunnel(db_config)
+                if local_port:
+                    connect_host = '127.0.0.1'
+                    connect_port = local_port
+                    logger.info(f"Using SSH tunnel for database connection (local port: {local_port})")
+                else:
+                    logger.warning("SSH tunnel configuration provided but tunnel failed to start, trying direct connection")
+            except Exception as e:
+                logger.error(f"Failed to start SSH tunnel: {e}. Trying direct connection...")
+                # Fall back to direct connection if SSH tunnel fails
+                connect_host = db_config['db_host']
+                connect_port = db_config['db_port']
+        else:
+            # Direct connection (no SSH tunnel)
+            connect_host = db_config['db_host']
+            connect_port = db_config['db_port']
+        
         _db_pool = ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
-            host=db_config['db_host'],
-            port=db_config['db_port'],
+            host=connect_host,
+            port=connect_port,
             database=db_config['db_name'],
             user=db_config['db_username'],
             password=db_config['db_password']
         )
-        logger.info("Database connection pool initialized")
+        logger.info(f"Database connection pool initialized (host: {connect_host}, port: {connect_port})")
         
         # Create tables if they don't exist
         _create_tables()
@@ -79,6 +431,8 @@ def init_db_pool():
     except Exception as e:
         logger.error(f"Failed to initialize database pool: {e}")
         _db_pool = None
+        # Clean up SSH tunnel if it was started
+        _stop_ssh_tunnel()
 
 
 def _create_tables():

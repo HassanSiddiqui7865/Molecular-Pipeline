@@ -50,12 +50,12 @@ def _create_html_template(data: Dict[str, Any]) -> str:
     resistant_genes = get_resistance_genes_from_input(input_params)
     resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else 'N/A'
     
-    # Get sample type from input parameters (for header display)
-    sample = input_params.get('sample', 'N/A')
-    if sample and sample != 'N/A':
-        sample = sample.upper()
+    # Get panel type from input parameters (for header display)
+    panel = input_params.get('panel', 'N/A')
+    if panel and panel != 'N/A':
+        panel = panel.upper()
     else:
-        sample = "N/A"
+        panel = "N/A"
     
     # Get gene analysis
     gene_analysis_list = result.get('pharmacist_analysis_on_resistant_gene', [])
@@ -71,7 +71,7 @@ def _create_html_template(data: Dict[str, Any]) -> str:
     <!-- Header Section -->
     <div class="header-section">
         <div class="header-main">
-            <div class="header-title">#{sample if sample != 'N/A' else 'N/A'}</div>
+            <div class="header-title">#{panel if panel != 'N/A' else 'N/A'}</div>
         </div>
     </div>
     

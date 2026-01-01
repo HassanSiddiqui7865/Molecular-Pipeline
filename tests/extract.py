@@ -165,7 +165,7 @@ def get_inputs_from_file(input_file_path: str = None) -> Dict[str, Any]:
             "resistant_genes": ["mecA"],
             "severity_codes": ["A41.2"],
             "age": 32,
-            "sample": "Blood",
+            "panel": "Blood",
             "systemic": True
         }
     

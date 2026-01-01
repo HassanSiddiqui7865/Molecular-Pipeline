@@ -1,187 +1,19 @@
 """
 Rank node for LangGraph - Groups antibiotics by name and places them in final ranked categories.
 Hybrid: Confidence-Interval + Hierarchical Fallback
-Filters out unsafe/ineffective antibiotics using LLM before ranking.
+Antibiotics are already filtered during extraction based on input parameters.
 """
 import json
 import logging
-import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List
 from collections import defaultdict
 
-from schemas import FilteredAntibioticsResult
-from prompts import ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE
 from utils import (
-    format_resistance_genes, get_icd_names_from_state,
-    get_pathogens_from_input, format_pathogens,
-    get_resistance_genes_from_input, create_llm, normalize_antibiotic_name,
-    retry_with_max_attempts, RetryError
+    normalize_antibiotic_name
 )
 
 logger = logging.getLogger(__name__)
-
-# LlamaIndex imports with fallback
-try:
-    from llama_index.core.program import LLMTextCompletionProgram
-    LLAMAINDEX_AVAILABLE = True
-except ImportError:
-    logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
-    LLAMAINDEX_AVAILABLE = False
-    LLMTextCompletionProgram = None
-
-
-def _filter_antibiotics_with_llm(
-    unique_antibiotics: List[str],
-    pathogen_display: str,
-    resistant_gene: str,
-    severity_codes: str,
-    age: Optional[int],
-    sample: Optional[str],
-    systemic: Optional[bool],
-    allergies: Optional[List[str]] = None,
-    retry_delay: float = 2.0
-) -> Dict[str, Any]:
-    """
-    Filter antibiotics using LLM to remove unsafe, toxic, or ineffective ones.
-    
-    Args:
-        unique_antibiotics: List of unique antibiotic names to filter
-        pathogen_display: Pathogen name for context
-        resistant_gene: Resistance gene for context
-        severity_codes: ICD severity codes for context
-        age: Patient age (optional)
-        sample: Sample type (optional)
-        systemic: Systemic flag (optional)
-        retry_delay: Initial delay between retries in seconds
-        
-    Returns:
-        Dict with:
-        - 'antibiotics_to_keep': Set of antibiotic names that should be KEPT
-        - 'filtered_out': List of dicts with 'medical_name' and 'filtering_reason'
-    """
-    if not unique_antibiotics:
-        return {
-            'antibiotics_to_keep': set(),
-            'filtered_out': []
-        }
-    
-    llm = create_llm()
-    if not llm:
-        logger.warning("LlamaIndex LLM not available, skipping antibiotic filtering")
-        return {
-            'antibiotics_to_keep': set(unique_antibiotics),
-            'filtered_out': []
-        }
-    
-    # Format antibiotic list for prompt
-    antibiotic_list = "\n".join([f"- {ab}" for ab in unique_antibiotics])
-    
-    # Format prompt
-    # Build conditional resistance gene sections
-    if resistant_gene:
-        resistance_context = f" | Resistance: {resistant_gene}"
-        resistance_decision_step = "2. Resistance genes affect ALL pathogens? YES→filter, NO→continue\n"
-        resistance_genes_evaluation = f"""RESISTANCE GENES: Evaluate per pathogen separately. Example: mecA affects beta-lactams in S. aureus but not E. faecalis. dfrA affects trimethoprim in BOTH → filter TMP-SMX.
-"""
-    else:
-        resistance_context = ""
-        resistance_decision_step = ""
-        resistance_genes_evaluation = ""
-    
-    # Build conditional allergy sections
-    from utils import format_allergies
-    allergy_display = format_allergies(allergies) if allergies else None
-    if allergy_display:
-        allergy_context = f" | Allergies: {allergy_display}"
-        allergy_decision_step = "2a. Patient allergic to this antibiotic or cross-reactive class? YES→filter, NO→continue\n"
-        allergy_filtering_criteria = f" OR patient allergic to {allergy_display} (including cross-reactive classes)"
-        allergy_evaluation = f"""ALLERGIES: Patient has allergies to: {allergy_display}. FILTER OUT antibiotics that:
-- Are the exact allergen (e.g., penicillin allergy → filter penicillins)
-- Are in the same drug class (e.g., penicillin allergy → consider filtering cephalosporins if severe allergy)
-- Contain the allergen (e.g., sulfa allergy → filter TMP-SMX, sulfonamides)
-- Have known cross-reactivity (e.g., penicillin → cephalosporins in severe cases)
-
-CRITICAL: For severe/life-threatening allergies, filter all cross-reactive antibiotics. For mild allergies, consider alternatives but prioritize safety.
-"""
-    else:
-        allergy_context = ""
-        allergy_decision_step = ""
-        allergy_filtering_criteria = ""
-        allergy_evaluation = ""
-    
-    prompt = ANTIBIOTIC_FILTERING_PROMPT_TEMPLATE.format(
-        pathogen_display=pathogen_display,
-        resistance_context=resistance_context,
-        allergy_context=allergy_context,
-        severity_codes=severity_codes,
-        age=f"{age} years" if age else 'Not specified',
-        sample=sample or 'Not specified',
-        systemic='Yes' if systemic else 'No',
-        antibiotic_list=antibiotic_list,
-        resistance_decision_step=resistance_decision_step,
-        resistance_genes_evaluation=resistance_genes_evaluation,
-        allergy_decision_step=allergy_decision_step,
-        allergy_filtering_criteria=allergy_filtering_criteria,
-        allergy_evaluation=allergy_evaluation
-    )
-    
-    def _perform_filtering():
-        program = LLMTextCompletionProgram.from_defaults(
-            output_cls=FilteredAntibioticsResult,
-            llm=llm,
-            prompt_template_str="{input_str}",
-            verbose=False
-        )
-        result = program(input_str=prompt)
-        if not result:
-            return None
-        result_dict = result.model_dump()
-        return result_dict
-    
-    try:
-        result_dict = retry_with_max_attempts(
-            operation=_perform_filtering,
-            operation_name="LLM antibiotic filtering",
-            max_attempts=5,
-            retry_delay=retry_delay,
-            should_retry_on_empty=True
-        )
-        
-        filtered_antibiotics = result_dict.get('filtered_antibiotics', [])
-        
-        # Build set of antibiotics to keep and list of filtered out ones
-        antibiotics_to_keep = set()
-        filtered_out = []
-        
-        for entry in filtered_antibiotics:
-            medical_name = entry.get('medical_name', '').strip()
-            should_keep = entry.get('should_keep', True)
-            filtering_reason = entry.get('filtering_reason')
-            
-            if should_keep:
-                antibiotics_to_keep.add(medical_name)
-            else:
-                filtered_out.append({
-                    'medical_name': medical_name,
-                    'filtering_reason': filtering_reason or 'No reason provided'
-                })
-                logger.info(f"Filtered out: {medical_name} - {filtering_reason}")
-        
-        logger.info(
-            f"Antibiotic filtering: {len(antibiotics_to_keep)} kept, "
-            f"{len(filtered_out)} filtered out from {len(unique_antibiotics)} total"
-        )
-        
-        return {
-            'antibiotics_to_keep': antibiotics_to_keep,
-            'filtered_out': filtered_out
-        }
-        
-    except RetryError as e:
-        logger.error(f"Antibiotic filtering failed after max attempts: {e}")
-        raise
-
 
 
 
@@ -350,7 +182,7 @@ def _calculate_rank_score(
 def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Node that groups antibiotics by name and reorganizes them into final ranked categories.
-    First ranks antibiotics, then filters out unsafe/ineffective ones using LLM.
+    Antibiotics are already filtered during extraction based on input parameters.
     Keeps same source_results structure but places antibiotics in their final categories.
     """
     try:
@@ -379,6 +211,14 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         total_sources = len(source_results)
         
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
+        # Emit progress for ranking start
+        if progress_callback:
+            progress_callback('rank', 0, 'Starting ranking...')
+        
         # Step 1: Collect all antibiotics from all sources, grouped by normalized name
         for source_result in source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
@@ -396,8 +236,14 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 antibiotic_groups[normalized_name]['original_names'].add(medical_name)
                                 antibiotic_original_categories[normalized_name][category] += 1
         
+        # Emit progress after collection
+        if progress_callback:
+            progress_callback('rank', 20, f'Collected {len(antibiotic_groups)} unique antibiotics')
+        
         # Step 2: Rank each antibiotic group and determine final category
         final_categories = {}  # normalized_name -> final_category
+        total_antibiotics = len(antibiotic_groups)
+        ranked_count = 0
         
         for normalized_name, group_data in antibiotic_groups.items():
             rank_result = _calculate_rank_score(
@@ -409,11 +255,22 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             )
             
             final_categories[normalized_name] = rank_result['final_category']
+            ranked_count += 1
+            
+            # Emit progress during ranking
+            if progress_callback and total_antibiotics > 0:
+                sub_progress = 30 + (ranked_count / total_antibiotics * 20)  # 30-50% for ranking
+                progress_callback('rank', sub_progress, f'Ranked {ranked_count}/{total_antibiotics} antibiotics')
+        
+        # Emit progress after ranking calculation
+        if progress_callback:
+            progress_callback('rank', 50, 'Reorganizing antibiotics into final categories...')
         
         # Step 3: Reorganize each source_result - place antibiotics in their final categories
         updated_source_results = []
+        total_sources_to_reorganize = len(source_results)
         
-        for source_result in source_results:
+        for idx, source_result in enumerate(source_results):
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
             
             # Collect all antibiotics from this source
@@ -444,87 +301,98 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             updated_source_result = source_result.copy()
             updated_source_result['antibiotic_therapy_plan'] = reorganized_plan
             updated_source_results.append(updated_source_result)
+            
+            # Emit progress during reorganization
+            if progress_callback and total_sources_to_reorganize > 0:
+                sub_progress = 50 + ((idx + 1) / total_sources_to_reorganize * 20)  # 50-70% for reorganization
+                progress_callback('rank', sub_progress, f'Reorganized {idx + 1}/{total_sources_to_reorganize} sources')
         
-        # Step 4: Filter antibiotics using LLM after ranking
-        # Collect unique antibiotics from ranked results
-        all_unique_antibiotics = set()
+        # Filter routes based on systemic flag before counting
+        input_params = state.get('input_parameters', {})
+        systemic = input_params.get('systemic')
+        systemic_routes = {'IV', 'PO', 'IM'}
+        
+        antibiotics_to_remove = {
+            'first_choice': [],
+            'second_choice': [],
+            'alternative_antibiotic': [],
+            'not_known': []
+        }
+        
         for source_result in updated_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
+            
             for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
                 antibiotics = therapy_plan.get(category, [])
-                if isinstance(antibiotics, list):
-                    for ab_entry in antibiotics:
-                        if isinstance(ab_entry, dict):
-                            medical_name = ab_entry.get('medical_name', '').strip()
-                            if medical_name:
-                                all_unique_antibiotics.add(medical_name)
+                if not isinstance(antibiotics, list):
+                    continue
+                
+                for idx, ab_entry in enumerate(antibiotics):
+                    if not isinstance(ab_entry, dict):
+                        continue
+                    
+                    route = ab_entry.get('route_of_administration')
+                    if route is None:
+                        route = ''
+                    else:
+                        route = str(route).strip()
+                    
+                    medical_name = ab_entry.get('medical_name', 'unknown')
+                    
+                    # Always filter out null/empty routes
+                    if not route:
+                        logger.warning(f"  [Route Filter] Filtered out {medical_name}: route is null/empty")
+                        antibiotics_to_remove[category].append((source_result, idx))
+                        continue
+                    
+                    # Filter based on systemic flag (only if systemic is not None)
+                    if systemic is not None:
+                        # Check if route is one of the systemic routes (IV, PO, IM)
+                        route_upper = route.upper()
+                        route_is_systemic = route_upper in systemic_routes
+                        
+                        if systemic is True:
+                            # Only keep routes that are IV, PO, or IM
+                            if not route_is_systemic:
+                                logger.warning(f"  [Route Filter] Filtered out {medical_name}: route '{route}' is not IV, PO, or IM (systemic=True)")
+                                antibiotics_to_remove[category].append((source_result, idx))
+                        elif systemic is False:
+                            # Exclude routes that are IV, PO, or IM
+                            if route_is_systemic:
+                                logger.warning(f"  [Route Filter] Filtered out {medical_name}: route '{route}' is IV, PO, or IM (systemic=False)")
+                                antibiotics_to_remove[category].append((source_result, idx))
+                        # If systemic is None, only null routes are filtered (already handled above)
+            
+            # Remove filtered antibiotics from source results
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+                if antibiotics_to_remove[category]:
+                    # Group by source_result
+                    source_to_indices = {}
+                    for source_result, idx in antibiotics_to_remove[category]:
+                        source_id = id(source_result)
+                        if source_id not in source_to_indices:
+                            source_to_indices[source_id] = (source_result, [])
+                        source_to_indices[source_id][1].append(idx)
+                    
+                    # Remove from each source in reverse order
+                    for source_result, indices in source_to_indices.values():
+                        therapy_plan = source_result.get('antibiotic_therapy_plan', {})
+                        antibiotics = therapy_plan.get(category, [])
+                        if isinstance(antibiotics, list):
+                            for idx in sorted(set(indices), reverse=True):
+                                if 0 <= idx < len(antibiotics):
+                                    removed_ab = antibiotics.pop(idx)
+                                    ab_name = removed_ab.get('medical_name', 'unknown') if isinstance(removed_ab, dict) else 'unknown'
+                                    logger.info(f"  [Route Filter] Removed {ab_name} from {category} (route does not match systemic={systemic})")
         
-        # Get progress callback from metadata if available
-        metadata = state.get('metadata', {})
-        progress_callback = metadata.get('progress_callback')
+        # Emit progress for ranking complete
+        if progress_callback:
+            progress_callback('rank', 100, 'Ranking complete')
         
-        # Filter antibiotics using LLM if we have any
-        antibiotics_to_keep = set(all_unique_antibiotics)
-        filtered_out_antibiotics = []
-        
-        if all_unique_antibiotics:
-            # Get patient context from state
-            input_params = state.get('input_parameters', {})
-            pathogens = get_pathogens_from_input(input_params)
-            pathogen_display = format_pathogens(pathogens) if pathogens else "unknown"
-            
-            resistant_genes = get_resistance_genes_from_input(input_params)
-            resistant_gene = format_resistance_genes(resistant_genes)  # Returns None if empty
-            from utils import get_allergies_from_input
-            allergies = get_allergies_from_input(input_params)
-            
-            severity_codes = get_icd_names_from_state(state)
-            age = input_params.get('age')
-            sample = input_params.get('sample')
-            systemic = input_params.get('systemic')
-            
-            # Emit progress for filtering start
-            if progress_callback:
-                progress_callback('rank', 10, f'Filtering {len(all_unique_antibiotics)} antibiotics...')
-            
-            # Filter antibiotics
-            filtering_result = _filter_antibiotics_with_llm(
-                unique_antibiotics=list(all_unique_antibiotics),
-                pathogen_display=pathogen_display,
-                resistant_gene=resistant_gene,
-                severity_codes=severity_codes,
-                age=age,
-                sample=sample,
-                systemic=systemic,
-                allergies=allergies
-            )
-            
-            # Emit progress for filtering complete
-            if progress_callback:
-                progress_callback('rank', 80, f'Filtered {len(filtering_result.get("filtered_out", []))} antibiotics')
-            
-            antibiotics_to_keep = filtering_result.get('antibiotics_to_keep', set(all_unique_antibiotics))
-            filtered_out_antibiotics = filtering_result.get('filtered_out', [])
-            
-            # Remove filtered antibiotics from the ranked results
-            for source_result in updated_source_results:
-                therapy_plan = source_result.get('antibiotic_therapy_plan', {})
-                for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
-                    antibiotics = therapy_plan.get(category, [])
-                    if isinstance(antibiotics, list):
-                        # Filter out antibiotics that should be removed
-                        filtered_antibiotics = [
-                            ab for ab in antibiotics
-                            if isinstance(ab, dict) and ab.get('medical_name', '').strip() in antibiotics_to_keep
-                        ]
-                        therapy_plan[category] = filtered_antibiotics
-                source_result['antibiotic_therapy_plan'] = therapy_plan
-        
-        # Count antibiotics in each final category after filtering
+        # Count antibiotics in each final category
         category_counts = {'first_choice': 0, 'second_choice': 0, 'alternative_antibiotic': 0, 'not_known': 0}
         all_assignments = []
         
-        # Recalculate final_categories based on what's left after filtering
         # Use sets to track unique antibiotics per category
         category_antibiotics = {
             'first_choice': set(),
@@ -532,7 +400,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'alternative_antibiotic': set(),
             'not_known': set()
         }
-        filtered_final_categories = {}
+        final_categories = {}
         
         for source_result in updated_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
@@ -545,14 +413,14 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             if medical_name:
                                 normalized_name = normalize_antibiotic_name(medical_name)
                                 category_antibiotics[category].add(normalized_name)
-                                filtered_final_categories[normalized_name] = category
+                                final_categories[normalized_name] = category
         
         # Count unique antibiotics per category
         for category, antibiotics_set in category_antibiotics.items():
             category_counts[category] = len(antibiotics_set)
         
-        # Log assignments only for antibiotics that passed filtering
-        for normalized_name, final_category in filtered_final_categories.items():
+        # Log assignments for all antibiotics
+        for normalized_name, final_category in final_categories.items():
             # Get occurrence counts
             group_data = antibiotic_groups.get(normalized_name, {})
             original_cats = antibiotic_original_categories.get(normalized_name, {})
@@ -597,7 +465,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 })
         
         logger.info(
-            f"Ranked and filtered {len(filtered_final_categories)} antibiotics: "
+            f"Ranked {len(final_categories)} antibiotics: "
             f"{category_counts['first_choice']} first_choice, "
             f"{category_counts['second_choice']} second_choice, "
             f"{category_counts['alternative_antibiotic']} alternative"
@@ -610,22 +478,21 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 f"{assignment['count_str']} (total: {assignment['total']})"
             )
         
+        # Emit progress for counting complete
+        if progress_callback:
+            progress_callback('rank', 90, 'Finalizing ranking results...')
+        
         # Save results
-        input_params = state.get('input_parameters', {})
-        _save_rank_results(input_params, updated_source_results, filtered_out_antibiotics)
+        _save_rank_results(input_params, updated_source_results)
+        
+        # Emit progress for ranking complete
+        if progress_callback:
+            progress_callback('rank', 100, 'Ranking complete')
         
         return {
-            'source_results': updated_source_results,  # Same structure, antibiotics reorganized
-            'filtered_out_antibiotics': filtered_out_antibiotics  # Antibiotics filtered out with reasons
+            'source_results': updated_source_results  # Same structure, antibiotics reorganized
         }
         
-    except RetryError as e:
-        error_msg = f"Rank node failed: {e.operation_name} - {str(e)}"
-        logger.error(error_msg)
-        # Record error in state and stop pipeline
-        errors = state.get('errors', [])
-        errors.append(error_msg)
-        raise Exception(error_msg) from e
     except Exception as e:
         logger.error(f"Error in rank_node: {e}", exc_info=True)
         # Record error in state
@@ -636,8 +503,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _save_rank_results(
     input_params: Dict, 
-    source_results: List[Dict],
-    filtered_out_antibiotics: List[Dict] = None
+    source_results: List[Dict]
 ) -> None:
     """Save rank results to file."""
     try:
@@ -652,10 +518,6 @@ def _save_rank_results(
             'input_parameters': input_params,
             'source_results': source_results
         }
-        
-        # Include filtered out antibiotics if available
-        if filtered_out_antibiotics:
-            result_data['filtered_out_antibiotics'] = filtered_out_antibiotics
         
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(result_data, f, indent=2, ensure_ascii=False)

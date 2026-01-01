@@ -56,7 +56,7 @@ class InputParameters(BaseModel):
     resistant_genes: List[str]
     severity_codes: List[str]
     age: Optional[int] = None
-    sample: Optional[str] = None
+    panel: Optional[str] = None
     systemic: Optional[bool] = None
     allergy: Optional[List[str]] = None
 
@@ -78,18 +78,6 @@ class OutputData(BaseModel):
     input_parameters: InputParameters
     extraction_date: str
     result: Optional[Dict[str, Any]] = Field(default_factory=dict)
-
-
-class FilteredAntibioticEntry(BaseModel):
-    """Schema for a filtered antibiotic entry."""
-    medical_name: str
-    should_keep: bool
-    filtering_reason: Optional[str] = None
-
-
-class FilteredAntibioticsResult(BaseModel):
-    """Schema for filtered antibiotics result."""
-    filtered_antibiotics: List[FilteredAntibioticEntry]
 
 
 class UnifiedAntibioticEntryForSynthesis(BaseModel):

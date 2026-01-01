@@ -2,16 +2,12 @@
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 
-# LangGraph and LangChain
+# LangGraph
 langgraph>=1.0.0
-langchain-core>=1.0.0
-langchain-ollama>=1.0.0
-langchain-openai>=1.0.0
 
 # Web scraping and parsing
 beautifulsoup4>=4.14.0
 selenium>=4.39.0
-undetected-chromedriver>=3.5.0
 
 # LLM and AI
 llama-index>=0.10.0
@@ -21,8 +17,7 @@ nltk>=3.8.0
 # API clients
 perplexityai>=0.22.0
 
-# Optional: Database connectivity (for ICD code lookup via SSH tunnel)
-# Required only if using database feature in icd_transform_node
+# Database connectivity (for ICD code lookup and session storage via SSH tunnel)
 paramiko>=3.0.0
 psycopg2-binary>=2.9.0
 

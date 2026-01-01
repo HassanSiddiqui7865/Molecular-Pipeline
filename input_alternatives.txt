@@ -41,7 +41,7 @@ Copy this JSON to replace content in input.json:
     "N39.0"
   ],
   "age": 28,
-  "sample": "Urine",
+  "panel": "Urine",
   "systemic": false
 }
 
@@ -75,6 +75,7 @@ Copy this JSON to replace content in input.json:
 
 
 
+
 {
   "pathogens": [
     {
@@ -103,12 +104,35 @@ Copy this JSON to replace content in input.json:
     "R30.9"
   ],
   "age": 32,
-  "sample": "Women Health",
   "systemic": false,
   "gender": "Female",
-  "allergies": [
+  "allergy": [
     "Amoxicillin",
     "Penicillin"
   ]
 }
 
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Acremonium strictum",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Candida albicans",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Candida auris",
+      "pathogen_count": "1x10^5"
+    }
+  ],
+  "resistant_genes": [],
+  "severity_codes": [
+    "B35.1"
+  ],
+  "age": 43,
+  "systemic": null,
+  "gender": "Male",
+  "allergy": []
+}

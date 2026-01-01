@@ -4,7 +4,6 @@ Uses LlamaIndex Pydantic program for structured extraction.
 """
 import json
 import logging
-import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -34,7 +33,7 @@ def _extract_with_llamaindex(
     resistant_gene: str,
     severity_codes: str,
     age: Optional[int],
-    sample: str,
+    panel: str,
     systemic: bool,
     pathogens: Optional[List[Dict[str, str]]] = None,
     resistant_genes_list: Optional[List[str]] = None,
@@ -90,8 +89,7 @@ def _extract_with_llamaindex(
         allergy_context=allergy_context,
         severity_codes=severity_codes,
         age=f"{age} years" if age else 'Not specified',
-        sample=sample or 'Not specified',
-        systemic='Yes' if systemic else 'No',
+        panel=panel or 'Not specified',
         content=content,
         resistance_genes_section=resistance_genes_section,
         resistance_filtering_rule=resistance_filtering_rule,
@@ -205,7 +203,7 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
         allergies = get_allergies_from_input(input_params)
         severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')
-        sample = input_params.get('sample', '')
+        panel = input_params.get('panel', '')
         systemic = input_params.get('systemic', True)
         
         def process_source(idx: int, result_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -227,7 +225,7 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 resistant_gene=resistant_gene_display,
                 severity_codes=severity_codes,
                 age=age,
-                sample=sample,
+                panel=panel,
                 systemic=systemic,
                 pathogens=pathogens,
                 resistant_genes_list=resistant_genes,

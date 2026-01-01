@@ -41,8 +41,34 @@
 
         <div class="main-content">
             <div class="input-section">
-                <h2>Input Parameters (JSON)</h2>
-                <textarea id="jsonInput" placeholder='Enter JSON input, e.g.:
+                <h2>Input Parameters</h2>
+                <div class="panel-selector" style="margin-bottom: 15px;">
+                    <label for="panelSelect" style="display: block; margin-bottom: 5px; font-weight: bold;">Select Panel:</label>
+                    <select id="panelSelect" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">-- Select Panel --</option>
+                        <option value="Blood">Blood</option>
+                        <option value="Urine">Urine</option>
+                        <option value="Sputum">Sputum</option>
+                        <option value="Respiratory">Respiratory</option>
+                        <option value="CSF">CSF</option>
+                        <option value="Wound">Wound</option>
+                        <option value="Nail">Nail</option>
+                        <option value="Skin">Skin</option>
+                        <option value="Vaginal">Vaginal</option>
+                        <option value="RT-PCR Monkeypox Virus (F3L gene) RT-PCR">RT-PCR Monkeypox Virus (F3L gene) RT-PCR</option>
+                        <option value="SARS - CoV2 + RSV + INFLUENZA A & B">SARS - CoV2 + RSV + INFLUENZA A & B</option>
+                        <option value="SARS CoV2 ONLY">SARS CoV2 ONLY</option>
+                        <option value="RESPIRATORY TRACT PANEL (RPP)">RESPIRATORY TRACT PANEL (RPP)</option>
+                        <option value="UTI">UTI</option>
+                        <option value="FUNGAL, SEPSIS & WOUND PANEL">FUNGAL, SEPSIS & WOUND PANEL</option>
+                        <option value="SEXUALLY TRANSMITTED INFECTION PANEL (STI)">SEXUALLY TRANSMITTED INFECTION PANEL (STI)</option>
+                        <option value="HELICOBACTER PYLORI">HELICOBACTER PYLORI</option>
+                        <option value="GASTROENTERITIS PANEL">GASTROENTERITIS PANEL</option>
+                        <option value="Womens Health Panel (Vaginosis)">Womens Health Panel (Vaginosis)</option>
+                    </select>
+                </div>
+                <h3 style="margin-top: 20px; margin-bottom: 10px;">JSON Input</h3>
+                <textarea id="jsonInput" placeholder='Enter JSON input (panel will be added automatically), e.g.:
 {
   "pathogens": [
     {
@@ -53,7 +79,6 @@
   "resistant_genes": ["mecA"],
   "severity_codes": ["A41.2"],
   "age": 32,
-  "sample": "Blood",
   "systemic": true
 }'></textarea>
                 <div class="button-group">
