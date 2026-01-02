@@ -3,17 +3,17 @@ let eventSource = null;
 let currentResult = null;
 
 // API base URL - automatically detects if running on different port
-// If page is served from port other than 5000, use localhost:5000 for API
+// If page is served from port other than 7653, use localhost:7653 for API
 const API_BASE_URL = (() => {
     const origin = window.location.origin;
     const port = window.location.port;
-    // If port is 5000 or no port (default), use same origin
-    // Otherwise, assume FastAPI is on port 5000
-    if (!port || port === '5000') {
+    // If port is 7653 or no port (default), use same origin
+    // Otherwise, assume FastAPI is on port 7653
+    if (!port || port === '7653') {
         return origin;
     }
-    // Extract protocol and hostname, use port 5000
-    return `${window.location.protocol}//${window.location.hostname}:5000`;
+    // Extract protocol and hostname, use port 7653
+    return `${window.location.protocol}//${window.location.hostname}:7653`;
 })();
 
 // Example JSON input (panel will be added from dropdown)
