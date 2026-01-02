@@ -1561,19 +1561,34 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         ab_name = removed_ab.get('medical_name', 'unknown') if isinstance(removed_ab, dict) else 'unknown'
                         logger.info(f"Removed {ab_name} from {category} (validation failed - drug name doesn't match)")
         
-        # Final cleanup: Fill missing fields for any remaining incomplete records (don't remove them)
+        # Final cleanup AFTER all enrichment processing:
+        # 1. Remove antibiotics with null critical fields (medical_name, dose_duration, coverage_for, route_of_administration)
+        # 2. Apply default values for renal_adjustment and general_considerations if still null
         for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
             antibiotics = therapy_plan.get(category, [])
             if isinstance(antibiotics, list):
-                for ab in antibiotics:
-                    # Set defaults only if not extracted from enrichment
+                # First, collect indices to remove (antibiotics with null critical fields)
+                indices_to_remove = []
+                for idx, ab in enumerate(antibiotics):
+                    medical_name = ab.get('medical_name', '')
+                    
+                    # CRITICAL: Remove antibiotics with null critical fields
+                    if (not medical_name or 
+                        ab.get('dose_duration') is None or 
+                        ab.get('coverage_for') is None or 
+                        ab.get('route_of_administration') is None):
+                        logger.warning(f"Removing {medical_name or 'unknown'} from {category}: critical fields are null")
+                        indices_to_remove.append(idx)
+                        continue
+                    
+                    # Set defaults for renal_adjustment and general_considerations if still null
                     if not ab.get('renal_adjustment'):
                         ab['renal_adjustment'] = "No Renal Adjustment"
-                        logger.info(f"  ✓ Set default renal_adjustment for {ab.get('medical_name', 'unknown')}: No Renal Adjustment")
+                        logger.info(f"  ✓ Set default renal_adjustment for {medical_name}: No Renal Adjustment")
                     
                     if not ab.get('general_considerations'):
                         ab['general_considerations'] = "Standard precautions apply; monitor for adverse effects"
-                        logger.info(f"  ✓ Set default general_considerations for {ab.get('medical_name', 'unknown')}")
+                        logger.info(f"  ✓ Set default general_considerations for {medical_name}")
                     
                     # Recalculate is_complete
                     ab['is_complete'] = (
@@ -1584,6 +1599,11 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         ab.get('renal_adjustment') is not None and
                         ab.get('general_considerations') is not None
                     )
+                
+                # Remove antibiotics with null critical fields (in reverse order to maintain indices)
+                for idx in sorted(indices_to_remove, reverse=True):
+                    removed_ab = antibiotics.pop(idx)
+                    logger.info(f"  ✗ Removed {removed_ab.get('medical_name', 'unknown')} from {category} (null critical fields)")
         
         # Group and unify antibiotics with the same name
         _group_and_unify_antibiotics(therapy_plan)
@@ -1626,6 +1646,7 @@ def _group_and_unify_antibiotics(therapy_plan: Dict[str, Any]) -> None:
             continue
         
         # Group antibiotics by medical_name
+        # CRITICAL: Skip antibiotics with null critical fields (safety check)
         grouped = {}
         for ab in antibiotics:
             if not isinstance(ab, dict):
@@ -1635,7 +1656,13 @@ def _group_and_unify_antibiotics(therapy_plan: Dict[str, Any]) -> None:
                 medical_name = medical_name.strip()
             else:
                 medical_name = ''
-            if not medical_name:
+            
+            # Skip antibiotics with null critical fields
+            if (not medical_name or 
+                ab.get('dose_duration') is None or 
+                ab.get('coverage_for') is None or 
+                ab.get('route_of_administration') is None):
+                logger.warning(f"Skipping {medical_name or 'unknown'} in grouping: critical fields are null")
                 continue
             
             if medical_name not in grouped:
