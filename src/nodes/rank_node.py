@@ -509,6 +509,12 @@ def _save_rank_results(
     try:
         from config import get_output_config
         output_config = get_output_config()
+        
+        # Check if saving is enabled
+        if not output_config.get('save_enabled', True):
+            logger.debug("Saving rank results disabled (production mode)")
+            return
+        
         output_dir = Path(output_config.get('directory', 'output'))
         output_dir.mkdir(parents=True, exist_ok=True)
         

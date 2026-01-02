@@ -176,24 +176,28 @@ def main():
         if result_backup:
             output_data['result'] = result_backup
     
-    # Save output with timestamp
+    # Save output with timestamp (only if saving is enabled)
     from config import get_output_config
     output_config = get_output_config()
-    output_dir = project_root / output_config.get('directory', 'output')
     
-    # Generate timestamp for filename
-    from datetime import datetime
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Get base filename and add timestamp before .json extension
-    base_filename = output_config.get('filename', 'pathogen_info_output.json')
-    if base_filename.endswith('.json'):
-        filename_with_timestamp = base_filename.replace('.json', f'_{timestamp}.json')
+    if output_config.get('save_enabled', True):
+        output_dir = project_root / output_config.get('directory', 'output')
+        
+        # Generate timestamp for filename
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Get base filename and add timestamp before .json extension
+        base_filename = output_config.get('filename', 'pathogen_info_output.json')
+        if base_filename.endswith('.json'):
+            filename_with_timestamp = base_filename.replace('.json', f'_{timestamp}.json')
+        else:
+            filename_with_timestamp = f"{base_filename}_{timestamp}.json"
+        
+        output_path = output_dir / filename_with_timestamp
+        save_output(output_data, str(output_path))
     else:
-        filename_with_timestamp = f"{base_filename}_{timestamp}.json"
-    
-    output_path = output_dir / filename_with_timestamp
-    save_output(output_data, str(output_path))
+        logger.info("Saving output disabled (production mode)")
     
     # Log result summary
     result = output_data.get('result', {})

@@ -67,8 +67,19 @@ def get_output_config() -> Dict[str, Any]:
         Dictionary with output configuration
     """
     _ensure_env_loaded()
-    # Check if saving is disabled (for production)
-    save_enabled = os.getenv('SAVE_OUTPUT_TO_DISK', 'true').lower() == 'true'
+    # Check environment mode - disable saving in production
+    env_mode = os.getenv('ENV', '').lower()
+    is_production = env_mode != 'dev'
+    
+    # Check if saving is explicitly disabled via env var, or if in production mode
+    save_enabled_env = os.getenv('SAVE_OUTPUT_TO_DISK', '').lower()
+    if save_enabled_env:
+        # Explicitly set via env var
+        save_enabled = save_enabled_env == 'true'
+    else:
+        # Default: enabled in dev, disabled in production
+        save_enabled = not is_production
+    
     return {
         'directory': os.getenv('OUTPUT_DIRECTORY', 'output'),
         'filename': os.getenv('OUTPUT_FILENAME', 'pathogen_info_output.json'),

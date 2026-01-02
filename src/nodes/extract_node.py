@@ -318,6 +318,12 @@ def _save_extraction_results(input_params: Dict, source_results: List[Dict]) -> 
     try:
         from config import get_output_config
         output_config = get_output_config()
+        
+        # Check if saving is enabled
+        if not output_config.get('save_enabled', True):
+            logger.debug("Saving extraction results disabled (production mode)")
+            return
+        
         output_dir = Path(output_config.get('directory', 'output'))
         output_dir.mkdir(parents=True, exist_ok=True)
         

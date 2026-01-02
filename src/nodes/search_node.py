@@ -167,6 +167,18 @@ def _save_search_cache(cache_path: str, search_query: str, search_results: List[
         search_query: The search query used
         search_results: List of search results to cache
     """
+    try:
+        from config import get_output_config
+        output_config = get_output_config()
+        
+        # Check if saving is enabled
+        if not output_config.get('save_enabled', True):
+            logger.debug("Saving search cache disabled (production mode)")
+            return
+    except Exception:
+        # If config check fails, allow saving (fallback)
+        pass
+    
     cache_file = Path(cache_path)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     
