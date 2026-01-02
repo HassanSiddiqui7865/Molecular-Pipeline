@@ -2,11 +2,9 @@
 Database session management for persistent session storage.
 Uses the same database as the ICD codes database with SSH tunnel support.
 """
-import json
 import logging
 import socket
 import threading
-from datetime import datetime
 from typing import Dict, Any, Optional
 from contextlib import contextmanager
 from pathlib import Path
@@ -131,33 +129,18 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
     """
     Create and manage SSH tunnel to database server using paramiko.
     Context manager version for temporary tunnels (used by ICD transform node).
-    Only creates SSH tunnel in development mode (ENV=dev).
-    In production mode (ENV=prod), yields None for direct connection.
     
     Args:
         db_config: Database configuration dictionary
         
     Yields:
-        Local port number for the tunnel (dev mode) or None (prod mode for direct connection)
+        Local port number for the tunnel
     """
-    import os
-    env_mode = os.getenv('ENV', '').lower()
-    is_development = env_mode == 'dev'
-    
-    # Production mode: No SSH tunnel, use direct connection
-    if not is_development:
-        logger.info("Production mode: Skipping SSH tunnel, use direct connection")
-        yield None
-        return
-    
-    # Development mode: Create SSH tunnel if configured
     if not PARAMIKO_AVAILABLE:
         raise ImportError("paramiko not available")
     
     if not db_config.get('ssh_host'):
-        logger.warning("Development mode: No SSH host configured, use direct connection")
-        yield None
-        return
+        raise ValueError("SSH host not configured")
     
     ssh_client = None
     forward_server = None
@@ -213,7 +196,7 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
                 logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
                 logger.info("Will attempt SSH connection with password only")
         else:
-            logger.info(f"SSH key file not found at {ssh_key_path}, will use password authentication only")
+            logger.info("SSH key file not found, will use password authentication only")
         
         # Connect to SSH server
         logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
@@ -295,24 +278,14 @@ def get_ssh_tunnel(db_config: Dict[str, Any]):
 def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
     """
     Start persistent SSH tunnel to database server using paramiko.
-    Only works in development mode (ENV=dev).
     
     Args:
         db_config: Database configuration dictionary
         
     Returns:
-        Local port number for the tunnel, or None if not in dev mode
+        Local port number for the tunnel
     """
     global _ssh_tunnel, _ssh_local_port
-    
-    # Check environment - only create SSH tunnel in development
-    import os
-    env_mode = os.getenv('ENV', '').lower()
-    is_development = env_mode == 'dev'
-    
-    if not is_development:
-        logger.info("Production mode: Skipping SSH tunnel creation")
-        return None
     
     if not PARAMIKO_AVAILABLE:
         raise ImportError("paramiko not available")
@@ -343,14 +316,8 @@ def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
         
         ssh_password = db_config.get('ssh_password', '')
         
-        if ssh_key_path:
-            logger.info(f"Looking for SSH key at: {ssh_key_path}")
-            logger.info(f"Key file exists: {ssh_key_path.exists()}")
-        else:
-            logger.info(f"SSH key file not found in project root ({project_root}), tried: key, key.txt")
-        
         # Try to load key from project root if it exists
-        if ssh_key_path and ssh_key_path.exists() and ssh_key_path.is_file():
+        if ssh_key_path:
             logger.info(f"Found SSH key file at {ssh_key_path}, attempting to load...")
             key_errors = []
             for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
@@ -375,7 +342,7 @@ def _start_ssh_tunnel(db_config: Dict[str, Any]) -> int:
                 logger.warning(f"Could not load SSH key from {ssh_key_path}. Tried: {', '.join(key_errors)}")
                 logger.info("Will attempt SSH connection with password only")
         else:
-            logger.info(f"SSH key file not found at {ssh_key_path}, will use password authentication only")
+            logger.info("SSH key file not found, will use password authentication only")
         
         # Connect to SSH server
         logger.info(f"Connecting to SSH server {db_config['ssh_host']}:{db_config['ssh_port']}...")
@@ -501,38 +468,28 @@ def init_db_pool():
             logger.warning("Application database not configured, session persistence disabled")
             return
         
-        # Determine connection method based on environment
-        # Development: Use SSH tunnel if configured
-        # Production: Use direct connection (database is local on VM)
-        import os
-        env_mode = os.getenv('ENV', '').lower()
-        is_development = env_mode == 'dev'
+        # Start SSH tunnel if SSH host is configured
+        connect_host = '127.0.0.1'
+        connect_port = db_config['db_port']
         
-        if is_development and db_config.get('ssh_host'):
-            # Development mode: Use SSH tunnel
+        if db_config.get('ssh_host'):
             try:
                 local_port = _start_ssh_tunnel(db_config)
                 if local_port:
                     connect_host = '127.0.0.1'
                     connect_port = local_port
-                    logger.info(f"Development mode: Using SSH tunnel for database connection (local port: {local_port})")
+                    logger.info(f"Using SSH tunnel for database connection (local port: {local_port})")
                 else:
                     logger.warning("SSH tunnel configuration provided but tunnel failed to start, trying direct connection")
-                    connect_host = db_config['db_host']
-                    connect_port = db_config['db_port']
             except Exception as e:
                 logger.error(f"Failed to start SSH tunnel: {e}. Trying direct connection...")
                 # Fall back to direct connection if SSH tunnel fails
                 connect_host = db_config['db_host']
                 connect_port = db_config['db_port']
         else:
-            # Production mode or no SSH host: Direct connection (database is local)
+            # Direct connection (no SSH tunnel)
             connect_host = db_config['db_host']
             connect_port = db_config['db_port']
-            if is_development:
-                logger.info("Development mode: No SSH host configured, using direct connection")
-            else:
-                logger.info("Production mode: Using direct connection to local database")
         
         _db_pool = ThreadedConnectionPool(
             minconn=1,
@@ -658,7 +615,7 @@ def save_session(
             if exists:
                 # Update existing session
                 cur.execute("""
-                    UPDATE pipeline_sessions
+                    UPDATE dev.pipeline_sessions
                     SET status = %s,
                         progress = %s,
                         current_stage = %s,
@@ -717,7 +674,7 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         with get_db_connection() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute(
-                "SELECT * FROM pipeline_sessions WHERE session_id = %s",
+                "SELECT * FROM dev.pipeline_sessions WHERE session_id = %s",
                 (session_id,)
             )
             row = cur.fetchone()
@@ -764,7 +721,7 @@ def list_sessions(limit: int = 50, status: Optional[str] = None) -> list:
                 cur.execute("""
                     SELECT session_id, input_parameters, status, progress, 
                            current_stage, created_at, updated_at, completed_at
-                    FROM pipeline_sessions
+                    FROM dev.pipeline_sessions
                     ORDER BY created_at DESC
                     LIMIT %s
                 """, (limit,))

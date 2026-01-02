@@ -176,15 +176,12 @@ def _get_db_connection_with_tunnel(db_config: Dict[str, Any]):
     cursor = None
     
     # Use nested context manager for SSH tunnel (from db_session)
-    # get_ssh_tunnel() handles environment: SSH tunnel in dev, direct connection in prod
     with get_ssh_tunnel(db_config) as local_port:
         try:
-            # Connect to PostgreSQL database
-            # If local_port is None (prod mode), use direct connection
-            # If local_port is set (dev mode), use SSH tunnel
+            # Connect to PostgreSQL database through SSH tunnel
             connection = psycopg2.connect(
-                host='127.0.0.1' if local_port else db_config['db_host'],
-                port=local_port if local_port else db_config['db_port'],
+                host='127.0.0.1',
+                port=local_port,
                 user=db_config['db_username'],
                 password=db_config['db_password'],
                 database=db_config['db_name']
