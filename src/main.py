@@ -92,24 +92,34 @@ def main():
     
     # Ollama configuration is now handled in each node that needs it
     
-    inputs = {
-        'pathogens': [
-            {'pathogen_name': 'Staphylococcus aureus', 'pathogen_count': '10^3 CFU/ML'},
-            {'pathogen_name': 'Enterococcus faecalis', 'pathogen_count': '10^4 CFU/ML'}
-        ],
-        'resistant_genes': ['mecA', 'tetM','dfrA','Ant-la',],
-        'severity_codes': ['A41.2', 'A41.81'],
-        'age': 32,
-        'sample': 'Blood',
-        'systemic': True
-    }
+    # Load inputs from command-line argument (JSON file path) or stdin
+    inputs = None
     
-    # Allow override via command-line arguments
     if len(sys.argv) > 1:
-        for arg in sys.argv[1:]:
-            if '=' in arg:
-                key, value = arg.split('=', 1)
-                inputs[key] = value
+        # First argument: path to JSON file with input parameters
+        input_file = Path(sys.argv[1])
+        if input_file.exists():
+            with open(input_file, 'r', encoding='utf-8') as f:
+                inputs = json.load(f)
+        else:
+            logger.error(f"Input file not found at {input_file}")
+            sys.exit(1)
+    else:
+        # Try to read from stdin
+        try:
+            if not sys.stdin.isatty():
+                inputs = json.load(sys.stdin)
+            else:
+                logger.error("No input provided. Usage: python main.py <input.json>")
+                logger.error("Or pipe JSON input: echo '{\"pathogens\":[...]}' | python main.py")
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON input: {e}")
+            sys.exit(1)
+    
+    if not inputs:
+        logger.error("No input parameters provided")
+        sys.exit(1)
     
     logger.info(f"Input parameters: {inputs}")
     
@@ -166,24 +176,28 @@ def main():
         if result_backup:
             output_data['result'] = result_backup
     
-    # Save output with timestamp
+    # Save output with timestamp (only if saving is enabled)
     from config import get_output_config
     output_config = get_output_config()
-    output_dir = project_root / output_config.get('directory', 'output')
     
-    # Generate timestamp for filename
-    from datetime import datetime
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Get base filename and add timestamp before .json extension
-    base_filename = output_config.get('filename', 'pathogen_info_output.json')
-    if base_filename.endswith('.json'):
-        filename_with_timestamp = base_filename.replace('.json', f'_{timestamp}.json')
+    if output_config.get('save_enabled', True):
+        output_dir = project_root / output_config.get('directory', 'output')
+        
+        # Generate timestamp for filename
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Get base filename and add timestamp before .json extension
+        base_filename = output_config.get('filename', 'pathogen_info_output.json')
+        if base_filename.endswith('.json'):
+            filename_with_timestamp = base_filename.replace('.json', f'_{timestamp}.json')
+        else:
+            filename_with_timestamp = f"{base_filename}_{timestamp}.json"
+        
+        output_path = output_dir / filename_with_timestamp
+        save_output(output_data, str(output_path))
     else:
-        filename_with_timestamp = f"{base_filename}_{timestamp}.json"
-    
-    output_path = output_dir / filename_with_timestamp
-    save_output(output_data, str(output_path))
+        logger.info("Saving output disabled (production mode)")
     
     # Log result summary
     result = output_data.get('result', {})
@@ -195,18 +209,6 @@ def main():
         logger.info(f"Result: {first_count} first_choice, {second_count} second_choice, {alt_count} alternative antibiotics")
     
     logger.info(f"Extraction complete")
-    
-    # Optionally export to PDF
-    try:
-        from export_pdf import export_to_pdf
-        # Export PDF
-        pdf_path = export_to_pdf(output_data)
-        logger.info(f"PDF report exported to: {pdf_path}")
-    except ImportError as e:
-        logger.warning(f"PDF export not available: {e}")
-        logger.info("Install xhtml2pdf to enable PDF export: pip install xhtml2pdf")
-    except Exception as e:
-        logger.warning(f"Error exporting PDF: {e}")
 
 
 if __name__ == "__main__":

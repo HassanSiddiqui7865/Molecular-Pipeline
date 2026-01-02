@@ -1,43 +1,64 @@
 """
 Test script for enrichment_node.
-Tests the enrichment node with a real output JSON file.
+Loads saved synthesize_node output and tests enrichment_node without running the whole pipeline.
 """
 import json
 import logging
 import sys
 from pathlib import Path
+from typing import Dict, Any
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add src to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "src"))
 
 from nodes.enrichment_node import enrichment_node
 from nodes.icd_transform_node import icd_transform_node
 
-# Setup logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(levelname)s: %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
-def load_test_data(json_path: str) -> dict:
+def load_synthesize_output(file_path: str) -> Dict[str, Any]:
     """
-    Load test data from JSON file.
+    Load synthesize_node output from a JSON file.
     
     Args:
-        json_path: Path to the JSON file
+        file_path: Path to the JSON file containing synthesize_node output
         
     Returns:
-        Dictionary with the test data
+        Dictionary with result and input_parameters
     """
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        logger.info(f"Loaded test data from {json_path}")
-        return data
+        
+        # Extract required fields
+        result = data.get('result', {})
+        input_parameters = data.get('input_parameters', {})
+        
+        if not result:
+            logger.warning(f"No result found in {file_path}")
+        
+        logger.info(f"Loaded synthesize output from {file_path}")
+        logger.info(f"Input parameters: {input_parameters}")
+        
+        return {
+            'result': result,
+            'input_parameters': input_parameters
+        }
+    except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
+        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing JSON file: {e}")
+        raise
     except Exception as e:
-        logger.error(f"Error loading test data: {e}")
+        logger.error(f"Error loading file: {e}")
         raise
 
 
@@ -130,27 +151,18 @@ def count_antibiotics_with_null_fields(therapy_plan: dict) -> dict:
     return counts
 
 
-def main():
-    """Main test function."""
-    # Path to test JSON file - use test_synthesize_output.json
-    if len(sys.argv) > 1:
-        test_json_path = Path(sys.argv[1])
-    else:
-        test_json_path = Path(__file__).parent / "output" / "test_synthesize_output.json"
+def test_enrichment_node(synthesize_output_file: str):
+    """
+    Test enrichment_node with saved synthesize_node output.
     
-    if not test_json_path.exists():
-        logger.error(f"Test file not found: {test_json_path}")
-        logger.info("Please provide the path to the JSON file as an argument")
-        logger.info(f"Example: python test_enrichment_node.py output/test_synthesize_output.json")
-        sys.exit(1)
-    
-    logger.info(f"Testing enrichment_node with: {test_json_path}")
-    
-    # Load test data
-    json_data = load_test_data(str(test_json_path))
+    Args:
+        synthesize_output_file: Path to JSON file containing synthesize_node output
+    """
+    # Load synthesize_node output
+    synthesize_data = load_synthesize_output(synthesize_output_file)
     
     # Create test state
-    initial_state = create_test_state(json_data)
+    initial_state = create_test_state(synthesize_data)
     
     # Count antibiotics with null fields before enrichment
     therapy_plan_before = initial_state['result'].get('antibiotic_therapy_plan', {})
@@ -185,43 +197,52 @@ def main():
     logger.info("\n=== RUNNING ENRICHMENT NODE ===")
     try:
         updated_state = enrichment_node(initial_state)
+        
+        # Extract result
+        enriched_result = updated_state.get('result', {})
+        
+        if enriched_result:
+            therapy_plan = enriched_result.get('antibiotic_therapy_plan', {})
+            first_choice = therapy_plan.get('first_choice', [])
+            second_choice = therapy_plan.get('second_choice', [])
+            alternative = therapy_plan.get('alternative_antibiotic', [])
+            
+            logger.info(
+                f"Result: {len(first_choice)} first_choice, "
+                f"{len(second_choice)} second_choice, "
+                f"{len(alternative)} alternative"
+            )
+        else:
+            logger.warning("No result returned from enrichment_node")
+        
+        logger.info("Test completed")
+        
+        return updated_state
+        
     except Exception as e:
         logger.error(f"Error running enrichment_node: {e}", exc_info=True)
-        sys.exit(1)
-    
-    # Count antibiotics after enrichment
-    therapy_plan_after = updated_state.get('result', {}).get('antibiotic_therapy_plan', {})
-    counts_after = count_antibiotics_with_null_fields(therapy_plan_after)
-    
-    logger.info("\n=== AFTER ENRICHMENT ===")
-    for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
-        logger.info(f"{category}: {counts_after[category]['with_null']}/{counts_after[category]['total']} have null fields")
-        logger.info(f"  Removed: {counts_before[category]['total'] - counts_after[category]['total']} antibiotics")
-    
-    # Save results
-    output_path = Path(__file__).parent / "output" / "enrichment_test_output.json"
-    try:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(updated_state.get('result', {}), f, indent=2, ensure_ascii=False)
-        logger.info(f"\n=== RESULTS SAVED ===")
-        logger.info(f"Output saved to: {output_path}")
-    except Exception as e:
-        logger.error(f"Error saving results: {e}")
-    
-    # Summary
-    logger.info("\n=== SUMMARY ===")
-    total_before = sum(counts_before[cat]['total'] for cat in counts_before)
-    total_after = sum(counts_after[cat]['total'] for cat in counts_after)
-    total_removed = total_before - total_after
-    
-    logger.info(f"Total antibiotics before: {total_before}")
-    logger.info(f"Total antibiotics after: {total_after}")
-    logger.info(f"Total removed (no valid drugs.com URL): {total_removed}")
-    
-    if total_removed > 0:
-        logger.warning(f"\n⚠️  {total_removed} antibiotics were removed because no valid drugs.com dosage URL was found")
+        raise
+
+
+def main():
+    """Main function."""
+    # Default to the most recent output file if no argument provided
+    if len(sys.argv) > 1:
+        synthesize_output_file = sys.argv[1]
     else:
-        logger.info("\n✓ All antibiotics had valid drugs.com URLs or no enrichment was needed")
+        # Try to find synthesize_result.json (from synthesize_node)
+        output_dir = project_root / "output"
+        synthesize_output_file_path = output_dir / "synthesize_result.json"
+        
+        if synthesize_output_file_path.exists():
+            synthesize_output_file = synthesize_output_file_path
+            logger.info(f"Using synthesize_result.json: {synthesize_output_file}")
+        else:
+            logger.error("synthesize_result.json not found. Please run synthesize_node first or provide a path to synthesize_result.json")
+            logger.error("Usage: python tests/enrichment.py [path_to_synthesize_result.json]")
+            sys.exit(1)
+    
+    test_enrichment_node(str(synthesize_output_file))
 
 
 if __name__ == "__main__":

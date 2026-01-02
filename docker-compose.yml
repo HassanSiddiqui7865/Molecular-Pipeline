@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  molecular-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: molecular-pipeline
+    ports:
+      - "7653:7653"
+    environment:
+      # Load from .env file (docker-compose will automatically load .env)
+      - ENV=${ENV:-prod}
+    env_file:
+      - .env
+    volumes:
+      # Mount output directory to persist results
+      - ./output:/app/output
+      # Mount .env file if you want to edit it without rebuilding
+      - ./.env:/app/.env:ro
+      # Mount key file for SSH (try key.txt first, fallback to key)
+      - ./key.txt:/app/key.txt:ro
+      - ./key:/app/key:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7653/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

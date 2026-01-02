@@ -1,704 +1,296 @@
 """
-Synthesize node for LangGraph - Aggregates and combines results from all sources using LangChain.
+Synthesize node for LangGraph - Groups antibiotics by name and unifies entries using LLM.
+Uses LlamaIndex for structured extraction.
 """
 import logging
 import json
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from schemas import UnifiedResistanceGenesResult
-from utils import format_resistance_genes, get_icd_names_from_state
+from schemas import UnifiedResistanceGenesResult, UnifiedAntibioticEntryForSynthesis
+from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm, clean_null_strings, normalize_antibiotic_name, retry_with_max_attempts, RetryError
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_antibiotic_name(name: str) -> str:
-    """
-    Normalize antibiotic name for comparison (case-insensitive, handle hyphens/dashes).
-    
-    Args:
-        name: Antibiotic name to normalize
-        
-    Returns:
-        Normalized name for comparison
-    """
-    if not name:
-        return ""
-    # Convert to lowercase, replace different dash types with standard hyphen
-    normalized = name.lower().strip()
-    normalized = normalized.replace('–', '-').replace('—', '-').replace('−', '-')
-    return normalized
+# LlamaIndex imports with fallback
+try:
+    from llama_index.core.program import LLMTextCompletionProgram
+    LLAMAINDEX_AVAILABLE = True
+except ImportError:
+    logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
+    LLAMAINDEX_AVAILABLE = False
+    LLMTextCompletionProgram = None
 
 
-def _clean_null_strings(data: Any) -> Any:
-    """Recursively convert string 'null' values to actual None/null."""
-    if isinstance(data, dict):
-        return {k: _clean_null_strings(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [_clean_null_strings(item) for item in data]
-    elif isinstance(data, str) and data.lower() == 'null':
-        return None
-    else:
-        return data
 
 
-def _format_resistance_genes_as_toon(resistance_genes_data: List[Dict[str, Any]]) -> str:
-    """
-    Format resistance genes data as TOON string to reduce token usage.
-    
-    Args:
-        resistance_genes_data: List of resistance gene dictionaries
-        
-    Returns:
-        TOON string representation
-    """
-    try:
-        from py_toon_format import encode
-        return encode(resistance_genes_data)
-    except ImportError:
-        # Fallback to JSON if TOON library not available
-        logger.warning("py-toon-format not installed, falling back to JSON. Install with: pip install py-toon-format")
-        return json.dumps(resistance_genes_data, indent=2, ensure_ascii=False)
 
 
-def _unify_all_antibiotic_fields_with_llm(
-    antibiotics_data: List[Dict[str, Any]],
-    llm: BaseChatModel
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Unify fields for all antibiotics in batch using LLM.
-    
-    Args:
-        antibiotics_data: List of dicts with 'medical_name' and 'all_entries'
-        llm: LangChain BaseChatModel
-        
-    Returns:
-        Dict mapping medical_name -> unified fields dict
-    """
-    if not antibiotics_data:
-        return {}
-    
-    # Build antibiotics data for prompt
-    antibiotics_text = []
-    for ab_data in antibiotics_data:
-        medical_name = ab_data['medical_name']
-        all_entries = ab_data['all_entries']
-        
-        entries_text = []
-        for i, entry in enumerate(all_entries, 1):
-            source_idx = entry.get('source_index', i)
-            entries_text.append(
-                f"  Source {source_idx}:\n"
-                f"    coverage_for: {entry.get('coverage_for') or 'null'}\n"
-                f"    route: {entry.get('route_of_administration') or 'null'}\n"
-                f"    dose_duration: {entry.get('dose_duration') or 'null'}\n"
-                f"    renal_adjustment: {entry.get('renal_adjustment') or 'null'}\n"
-                f"    general_considerations: {entry.get('general_considerations') or 'null'}"
-            )
-        
-        antibiotics_text.append(f"{medical_name}:\n" + "\n".join(entries_text))
-    
-    antibiotics_list = "\n\n".join(antibiotics_text)
-    
-    prompt = f"""Unify antibiotic fields from multiple sources.
-
-DATA:
-{antibiotics_list}
-
-RULES:
-- Synthesize best information from all sources
-- If null in one source but present in another, use the data
-- If multiple values exist, choose most comprehensive/accurate
-- Combine general_considerations when appropriate
-- If null in ALL sources, return null (not string "null")
-
-OUTPUT (per antibiotic):
-- coverage_for: Specific indication (e.g., "VRE bacteremia")
-- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
-- dose_duration: Natural text format including all dosages (loading and maintenance) in concise way (e.g., "600 mg PO q12h for 7 days", "Loading: 1g IV, then 500 mg q12h for 7-14 days", "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days") or null
-- renal_adjustment: Dose adjustment guidance or null
-- general_considerations: Combined clinical notes or null
-
-Return unified fields for ALL antibiotics."""
-
-    try:
-        from pydantic import BaseModel, Field
-        class UnifiedFields(BaseModel):
-            medical_name: str
-            coverage_for: Optional[str] = Field(None, description="Unified coverage indication")
-            route_of_administration: Optional[str] = Field(None, description="Unified route")
-            dose_duration: Optional[str] = Field(None, description="Unified dose and duration")
-            renal_adjustment: Optional[str] = Field(None, description="Unified renal adjustment")
-            general_considerations: Optional[str] = Field(None, description="Unified general considerations")
-        
-        class BatchUnifiedFieldsResult(BaseModel):
-            unified_antibiotics: List[UnifiedFields] = Field(..., description="Unified fields for all antibiotics")
-        
-        structured_llm = llm.with_structured_output(BatchUnifiedFieldsResult)
-        result = structured_llm.invoke(prompt)
-        
-        if result and result.unified_antibiotics:
-            unified_map = {}
-            for unified in result.unified_antibiotics:
-                unified_map[unified.medical_name] = {
-                    'coverage_for': unified.coverage_for if unified.coverage_for else None,
-                    'route_of_administration': unified.route_of_administration if unified.route_of_administration else None,
-                    'dose_duration': unified.dose_duration if unified.dose_duration else None,
-                    'renal_adjustment': unified.renal_adjustment if unified.renal_adjustment else None,
-                    'general_considerations': unified.general_considerations if unified.general_considerations else None
-                }
-                # Clean null strings
-                for key, value in unified_map[unified.medical_name].items():
-                    if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
-                        unified_map[unified.medical_name][key] = None
-            return unified_map
-        else:
-            logger.warning("LLM returned no unified fields, using fallback")
-            return _fallback_unify_fields(antibiotics_data)
-    except Exception as e:
-        logger.warning(f"Error in batch field unification: {e}, using fallback")
-        return _fallback_unify_fields(antibiotics_data)
-
-
-def _fallback_unify_fields(antibiotics_data: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Fallback field unification using simple merge."""
-    unified_map = {}
-    for ab_data in antibiotics_data:
-        medical_name = ab_data['medical_name']
-        all_entries = ab_data['all_entries']
-        
-        if not all_entries:
-            unified_map[medical_name] = {}
-            continue
-        
-        unified = all_entries[0].copy()
-        fields_to_unify = ['coverage_for', 'route_of_administration', 'dose_duration', 'renal_adjustment', 'general_considerations']
-        
-        for field in fields_to_unify:
-            current_value = unified.get(field)
-            if not current_value or (isinstance(current_value, str) and current_value.lower() in ['null', 'none', 'not specified', '']):
-                for entry in all_entries[1:]:
-                    other_value = entry.get(field)
-                    if other_value and isinstance(other_value, str) and other_value.lower() not in ['null', 'none', 'not specified', '']:
-                        unified[field] = other_value
-                        break
-        
-        unified_map[medical_name] = {
-            'coverage_for': unified.get('coverage_for'),
-            'route_of_administration': unified.get('route_of_administration'),
-            'dose_duration': unified.get('dose_duration'),
-            'renal_adjustment': unified.get('renal_adjustment'),
-            'general_considerations': unified.get('general_considerations')
-        }
-    
-    return unified_map
-
-
-def _rank_all_antibiotics_with_llm(
-    antibiotics_data: List[Dict[str, Any]],
-    total_sources: int,
-    resistant_gene: str,
-    severity_codes: str,
-    llm: BaseChatModel
-) -> Dict[str, str]:
-    """
-    Rank all antibiotics in batch using LLM based on category counts.
-    
-    Args:
-        antibiotics_data: List of dicts with 'medical_name', 'first_choice_count', 'second_choice_count', 'alternative_count'
-        total_sources: Total number of sources
-        resistant_gene: Resistance gene name
-        severity_codes: ICD severity codes
-        llm: LangChain BaseChatModel
-        
-    Returns:
-        Dict mapping medical_name -> final_category ('first_choice', 'second_choice', or 'alternative_antibiotic')
-    """
-    if not antibiotics_data:
-        return {}
-    
-    # Build antibiotics list for prompt
-    antibiotics_text = []
-    for ab_data in antibiotics_data:
-        medical_name = ab_data['medical_name']
-        first_choice_count = ab_data.get('first_choice_count', 0)
-        second_choice_count = ab_data.get('second_choice_count', 0)
-        alternative_count = ab_data.get('alternative_count', 0)
-        
-        category_info = []
-        if first_choice_count > 0:
-            category_info.append(f"{first_choice_count}/{total_sources} as first_choice")
-        if second_choice_count > 0:
-            category_info.append(f"{second_choice_count}/{total_sources} as second_choice")
-        if alternative_count > 0:
-            category_info.append(f"{alternative_count}/{total_sources} as alternative")
-        
-        category_text = ", ".join(category_info) if category_info else "No category assignments"
-        antibiotics_text.append(f"- {medical_name}: {category_text}")
-    
-    antibiotics_list = "\n".join(antibiotics_text)
-    
-    prompt = f"""Rank antibiotics for {resistant_gene} resistance.
-
-PATIENT: Resistance={resistant_gene} | ICD={severity_codes}
-
-ANTIBIOTICS:
-{antibiotics_list}
-
-CATEGORIES:
-- first_choice: Best/preferred option
-- second_choice: Good alternative  
-- alternative_antibiotic: Other viable option
-
-RANKING FACTORS:
-1. Category distribution (mostly first_choice → first_choice)
-2. Medical guidelines for {resistant_gene}
-3. Clinical appropriateness for ICD: {severity_codes}
-
-Return final_category for ALL antibiotics."""
-    
-    try:
-        from pydantic import BaseModel, Field
-        class RankedAntibiotic(BaseModel):
-            medical_name: str
-            final_category: str = Field(..., description="'first_choice', 'second_choice', or 'alternative_antibiotic'")
-        
-        class BatchRankingResult(BaseModel):
-            rankings: List[RankedAntibiotic] = Field(..., description="Rankings for all antibiotics")
-        
-        structured_llm = llm.with_structured_output(BatchRankingResult)
-        result = structured_llm.invoke(prompt)
-        
-        if result and result.rankings:
-            return {r.medical_name: r.final_category for r in result.rankings}
-        else:
-            logger.warning("LLM returned no rankings, using fallback logic")
-            return _fallback_rankings(antibiotics_data)
-    except Exception as e:
-        logger.warning(f"Error in batch ranking: {e}, using fallback logic")
-        return _fallback_rankings(antibiotics_data)
-
-
-def _fallback_rankings(antibiotics_data: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Fallback ranking logic using highest count category."""
-    rankings = {}
-    for ab_data in antibiotics_data:
-        medical_name = ab_data['medical_name']
-        first_choice_count = ab_data.get('first_choice_count', 0)
-        second_choice_count = ab_data.get('second_choice_count', 0)
-        alternative_count = ab_data.get('alternative_count', 0)
-        
-        if first_choice_count >= second_choice_count and first_choice_count >= alternative_count:
-            rankings[medical_name] = 'first_choice'
-        elif second_choice_count >= alternative_count:
-            rankings[medical_name] = 'second_choice'
-        else:
-            rankings[medical_name] = 'alternative_antibiotic'
-    return rankings
-
-
-def _unify_all_with_llm(
-    antibiotics_to_unify: List[Dict[str, Any]],
-    resistance_genes_to_unify: List[Dict[str, Any]],
-    input_params: Dict[str, Any],
-    llm: BaseChatModel,
-    state: Dict[str, Any] = None
+def _unify_antibiotic_group_with_llm(
+    antibiotic_name: str,
+    entries: List[Dict[str, Any]],
+    route_of_administration: str = '',
+    retry_delay: float = 2.0
 ) -> Dict[str, Any]:
     """
-    Unify all antibiotics and resistance genes using LLM.
-    Re-ranks antibiotics and collects ALL dosage mentions (not just unified).
+    Unify multiple entries of the same antibiotic with the same route using LLM.
     
     Args:
-        antibiotics_to_unify: List of aggregated antibiotics with their entries
-        resistance_genes_to_unify: List of aggregated resistance genes with their entries
-        input_params: Input parameters (pathogen_name, resistant_gene, etc.)
-        llm: LangChain BaseChatModel
+        antibiotic_name: The antibiotic name
+        entries: List of entries for this antibiotic from different sources (all with same route)
+        route_of_administration: The route of administration for this group
+        retry_delay: Initial delay between retries in seconds
         
     Returns:
-        Dictionary with unified first_choice, second_choice, alternative_antibiotic, and resistance_genes
+        Unified antibiotic entry
     """
-    # Get pathogens
-    from utils import get_pathogens_from_input, format_pathogens
-    pathogens = get_pathogens_from_input(input_params)
-    pathogen_name = format_pathogens(pathogens) if pathogens else 'Unknown'
+    if not entries:
+        return {}
     
-    # Get resistance genes
-    from utils import get_resistance_genes_from_input, format_resistance_genes
-    resistant_genes = get_resistance_genes_from_input(input_params)
-    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else 'Unknown'
+    # If only one entry, return it as-is (no unification needed)
+    if len(entries) == 1:
+        entry = entries[0].copy()
+        # Remove source-specific fields
+        entry.pop('source_index', None)
+        entry.pop('original_category', None)
+        return entry
     
-    # Get ICD names from state (transformed), fallback to codes
-    if state:
-        severity_codes = get_icd_names_from_state(state)
-    else:
-        from utils import get_severity_codes_from_input, format_icd_codes
-        severity_codes_list = get_severity_codes_from_input(input_params)
-        severity_codes = format_icd_codes(severity_codes_list) if severity_codes_list else 'not specified'
-    sample = input_params.get('sample', '')
-    systemic = input_params.get('systemic', True)
-    age = input_params.get('age')
-    
-    # Calculate total sources from all entries
-    all_source_indices = set()
-    for ab_data in antibiotics_to_unify:
-        for entry in ab_data['entries']:
-            source_idx = entry.get('source_index', 0)
-            if source_idx > 0:
-                all_source_indices.add(source_idx)
-    total_sources = len(all_source_indices) if all_source_indices else 1
-    
-    logger.info(f"Unifying {len(antibiotics_to_unify)} antibiotics and {len(resistance_genes_to_unify)} resistance genes from {total_sources} sources")
-    
-    # Prepare data for ranking and field collection
-    ranking_data = []
-    field_collection_data = []
-    
-    for ab_data in antibiotics_to_unify:
-        all_entries = ab_data['entries']
-        normalized_name = ab_data['normalized_name']
-        medical_name = all_entries[0].get('medical_name', normalized_name) if all_entries else normalized_name
+    # Build prompt with all entries
+    entries_text = []
+    for i, entry in enumerate(entries, 1):
+        source_idx = entry.get('source_index', i)
+        original_category = entry.get('original_category', 'unknown')
         
-        # Count appearances in each category for ranking
-        first_choice_count = sum(1 for e in all_entries if e.get('original_category') == 'first_choice')
-        second_choice_count = sum(1 for e in all_entries if e.get('original_category') == 'second_choice')
-        alternative_count = sum(1 for e in all_entries if e.get('original_category') == 'alternative_antibiotic')
-        
-        ranking_data.append({
-            'medical_name': medical_name,
-            'first_choice_count': first_choice_count,
-            'second_choice_count': second_choice_count,
-            'alternative_count': alternative_count
-        })
-        
-        field_collection_data.append({
-            'medical_name': medical_name,
-            'all_entries': all_entries,
-            'mentioned_in_sources': ab_data['mentioned_in_sources']
-        })
+        entries_text.append(
+            f"Source {source_idx} (Category: {original_category}):\n"
+            f"  medical_name: {entry.get('medical_name', 'null')}\n"
+            f"  coverage_for: {entry.get('coverage_for') or 'null'}\n"
+            f"  route_of_administration: {entry.get('route_of_administration') or 'null'}\n"
+            f"  dose_duration: {entry.get('dose_duration') or 'null'}\n"
+            f"  renal_adjustment: {entry.get('renal_adjustment') or 'null'}\n"
+            f"  general_considerations: {entry.get('general_considerations') or 'null'}\n"
+            f"  is_combined: {entry.get('is_combined', False)}"
+        )
     
-    # Single LLM call: Rank + Unify fields (with all dosage mentions)
-    logger.info(f"Ranking and unifying {len(field_collection_data)} antibiotics in one LLM call...")
+    entries_list = "\n\n".join(entries_text)
     
-    # Build prompt with all data
-    antibiotics_text = []
-    for ab_data in field_collection_data:
-        medical_name = ab_data['medical_name']
-        all_entries = ab_data['all_entries']
-        
-        # Count category appearances
-        first_choice_count = sum(1 for e in all_entries if e.get('original_category') == 'first_choice')
-        second_choice_count = sum(1 for e in all_entries if e.get('original_category') == 'second_choice')
-        alternative_count = sum(1 for e in all_entries if e.get('original_category') == 'alternative_antibiotic')
-        
-        category_info = []
-        if first_choice_count > 0:
-            category_info.append(f"{first_choice_count}/{total_sources} as first_choice")
-        if second_choice_count > 0:
-            category_info.append(f"{second_choice_count}/{total_sources} as second_choice")
-        if alternative_count > 0:
-            category_info.append(f"{alternative_count}/{total_sources} as alternative")
-        category_text = ", ".join(category_info) if category_info else "No category assignments"
-        
-        # Collect all entries data
-        entries_data = []
-        for entry in all_entries:
-            entries_data.append({
-                'source': f"Source {entry.get('source_index', '?')}",
-                'coverage_for': entry.get('coverage_for') or 'null',
-                'route': entry.get('route_of_administration') or 'null',
-                'dose_duration': entry.get('dose_duration') or 'null',
-                'renal_adjustment': entry.get('renal_adjustment') or 'null',
-                'general_considerations': entry.get('general_considerations') or 'null'
-            })
-        
-        entries_text = "\n".join([
-            f"  {e['source']}: coverage={e['coverage_for']}, route={e['route']}, dose={e['dose_duration']}, renal={e['renal_adjustment']}, considerations={e['general_considerations']}"
-            for e in entries_data
-        ])
-        
-        antibiotics_text.append(f"{medical_name} (Category: {category_text}):\n{entries_text}")
+    # Use prompt template from prompts.py
+    # All entries in this group have the same route
+    route_display = route_of_administration if route_of_administration else 'null'
+    prompt = ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE.format(
+        antibiotic_name=antibiotic_name,
+        route_of_administration=route_display,
+        entries_list=entries_list
+    )
+
+    llm = create_llm()
+    if not llm:
+        logger.warning("LlamaIndex LLM not available, using first entry")
+        entry = entries[0].copy()
+        entry.pop('source_index', None)
+        entry.pop('original_category', None)
+        return entry
     
-    antibiotics_list = "\n\n".join(antibiotics_text)
-    
-    # Build patient context with sample and systemic info
-    patient_context = f"Resistance: {resistant_gene} | ICD: {severity_codes}"
-    if sample:
-        patient_context += f" | Sample: {sample}"
-    if systemic is not None:
-        patient_context += f" | Systemic: {'Yes' if systemic else 'No'}"
-    
-    prompt = f"""Unify and rank antibiotics for {resistant_gene} resistance.
-
-PATIENT: {patient_context}
-
-ANTIBIOTICS FROM SOURCES:
-{antibiotics_list}
-
-PROCESS:
-1. GROUP: Identify same antibiotics across sources → ONE unified entry with standard name
-2. UNIFY: Combine information, keep only data relevant to patient parameters
-3. DOSAGE: Select ONE optimal dose_duration from sources matching patient parameters
-4. RANK: Determine final_category (first_choice/second_choice/alternative_antibiotic)
-5. COMPLETENESS: Mark is_complete=True if ALL critical fields are non-null
-
-CRITICAL FIELDS (all required for is_complete=True):
-- medical_name, coverage_for, dose_duration, route_of_administration, renal_adjustment, general_considerations
-
-FIELD RULES:
-- coverage_for: Keep only indications matching ICD: {severity_codes} (don't combine all)
-- route_of_administration: 'IV', 'PO', 'IM', 'IV/PO', or null
-- dose_duration: 
-  * Use ONLY dosages from sources matching ICD: {severity_codes}, Gene: {resistant_gene}, Age: {age if age else 'N/A'}
-  * Format: Natural text format for dosing information - include ALL dosages (loading and maintenance) in concise way
-  * Single: "600 mg PO q12h for 7 days"
-  * With loading: "Loading: 1g IV, then 500 mg q12h for 7-14 days" or "1g IV once, then 500 mg q12h for 7-14 days"
-  * Multiple phases: "450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days"
-  * Combinations: "Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days"
-  * EXCLUDE: monitoring details, target levels, infusion rates, administration notes (place in general_considerations)
-  * Include loading doses if present - keep concise and natural
-  * DO NOT invent or combine unrelated dosages
-  * If null in sources, return null
-{f"  * Sample type: Prioritize dosages for \"{sample}\" samples" if sample else ""}
-{f"  * Systemic: Prefer IV/PO/IM for systemic treatment" if systemic is not None else ""}
-- renal_adjustment: Combine all. Format: "Adjust dose in CrCl < X mL/min". Default: 'No adjustment needed' if not mentioned
-- general_considerations: Combine all clinical notes. Default: 'Standard monitoring recommended' if not mentioned
-
-RANKING:
-- Consider category distribution, medical guidelines for {resistant_gene}, clinical appropriateness for ICD: {severity_codes}
-
-OUTPUT (per antibiotic):
-- medical_name: Standard name
-- final_category: 'first_choice', 'second_choice', or 'alternative_antibiotic'
-- coverage_for: Indication matching patient condition
-- route_of_administration: Unified route or null
-- dose_duration: ONE optimal dosage from sources or null
-- renal_adjustment: Combined adjustment info or default
-- general_considerations: Combined notes or default
-- is_complete: True if ALL critical fields non-null, else False
-
-Return ALL unified antibiotics."""
+    def _perform_unification():
+        # Use LlamaIndex with schema from schemas.py
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=UnifiedAntibioticEntryForSynthesis,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        return result_dict
     
     try:
-        from pydantic import BaseModel, Field
-        class RankedAndUnifiedAntibiotic(BaseModel):
-            medical_name: str = Field(..., description="Standard name for the antibiotic (use most complete/standard form after grouping medically equivalent entries)")
-            final_category: str = Field(..., description="'first_choice', 'second_choice', or 'alternative_antibiotic' based on category distribution and medical guidelines")
-            coverage_for: Optional[str] = Field(None, description="Coverage indication relevant to patient condition. Keep only what matches the use case - do not combine all mentions.")
-            route_of_administration: Optional[str] = Field(None, description="Unified route - combine all from all sources in the group")
-            dose_duration: Optional[str] = Field(None, description="Dosing information in natural text format including ALL dosages (loading and maintenance) in concise way. MUST match the specific ICD code conditions and consider resistance gene and patient age. Examples: '600 mg IV q12h for 14 days', 'Loading: 1g IV, then 500 mg q12h for 7-14 days', '450 mg q24h on Days 1 and 2, then 300 mg q24h for 7-14 days', 'Trimethoprim 160 mg plus Sulfamethoxazole 800 mg PO q12h for 7 days'. EXCLUDE monitoring details, target levels, infusion rates, administration notes (place in general_considerations). Include loading doses if present - keep concise and natural. DO NOT create duplicates - choose ONE most appropriate dosage. Use ONLY dosages FROM PROVIDED SOURCES ONLY that matches patient parameters (ICD codes, resistance gene, age). DO NOT invent or hallucinate. DO NOT combine unrelated dosages. If sources say null or 'not specified', return null (NOT an invented dosage).")
-            renal_adjustment: Optional[str] = Field(None, description="Unified renal adjustment - combine all from all sources in the group")
-            general_considerations: Optional[str] = Field(None, description="Unified general considerations - combine all from all sources in the group to make data complete")
-            is_complete: bool = Field(..., description="True if medical_name, coverage_for, dose_duration, route_of_administration, renal_adjustment, and general_considerations are ALL non-null. False if any of these critical fields is null.")
+        result_dict = retry_with_max_attempts(
+            operation=_perform_unification,
+            operation_name=f"LLM unification for {antibiotic_name}",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
         
-        class CombinedResult(BaseModel):
-            antibiotics: List[RankedAndUnifiedAntibiotic] = Field(..., description="Medically equivalent antibiotics grouped and unified, with complete data from all sources")
-        
-        structured_llm = llm.with_structured_output(CombinedResult)
-        result = structured_llm.invoke(prompt)
-        
-        rankings_map = {}
-        unified_fields_map = {}
-        completeness_map = {}
-        
-        if result and result.antibiotics:
-            for ab in result.antibiotics:
-                medical_name = ab.medical_name
-                rankings_map[medical_name] = ab.final_category
-                unified_fields_map[medical_name] = {
-                    'coverage_for': ab.coverage_for if ab.coverage_for else None,
-                    'route_of_administration': ab.route_of_administration if ab.route_of_administration else None,
-                    'dose_duration': ab.dose_duration if ab.dose_duration else None,
-                    'renal_adjustment': ab.renal_adjustment if ab.renal_adjustment else None,
-                    'general_considerations': ab.general_considerations if ab.general_considerations else None
-                }
-                # Clean null strings
-                for key, value in unified_fields_map[medical_name].items():
-                    if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
-                        unified_fields_map[medical_name][key] = None
-                
-                # Store completeness from LLM
-                completeness_map[medical_name] = ab.is_complete
-        else:
-            logger.warning("LLM returned no results, using fallback")
-            rankings_map = _fallback_rankings(ranking_data)
-            unified_fields_map = _fallback_unify_fields(field_collection_data)
-            completeness_map = {}
-    except Exception as e:
-        logger.warning(f"Error in combined ranking/unification: {e}, using fallback")
-        rankings_map = _fallback_rankings(ranking_data)
-        unified_fields_map = _fallback_unify_fields(field_collection_data)
-        completeness_map = {}
-    
-    # Build final entries (deduplicated by medical_name, re-ranked)
-    antibiotics_result = {
-        'first_choice': [],
-        'second_choice': [],
-        'alternative_antibiotic': []
-    }
-    
-    # Deduplicate: track which antibiotics we've already added
-    seen_antibiotics = set()
-    
-    for ab_data in field_collection_data:
-        medical_name = ab_data['medical_name']
-        
-        # Skip if already processed (deduplication)
-        if medical_name in seen_antibiotics:
-            continue
-        seen_antibiotics.add(medical_name)
-        
-        # Get re-ranked category
-        final_category = rankings_map.get(medical_name, 'alternative_antibiotic')
-        unified_fields = unified_fields_map.get(medical_name, {})
-        
-        final_entry = {
-            'medical_name': medical_name,
-            'coverage_for': unified_fields.get('coverage_for'),
-            'route_of_administration': unified_fields.get('route_of_administration'),
-            'dose_duration': unified_fields.get('dose_duration'),  # Contains ALL dosage mentions
-            'renal_adjustment': unified_fields.get('renal_adjustment'),
-            'general_considerations': unified_fields.get('general_considerations'),
-            'mentioned_in_sources': ab_data['mentioned_in_sources']
+        # Trust LLM's output completely - it will set dose_duration to null if incomplete per prompt
+        unified = {
+            'medical_name': result_dict.get('medical_name', antibiotic_name),
+            'coverage_for': result_dict.get('coverage_for') if result_dict.get('coverage_for') else None,
+            'route_of_administration': result_dict.get('route_of_administration') if result_dict.get('route_of_administration') else None,
+            'dose_duration': result_dict.get('dose_duration') if result_dict.get('dose_duration') else None,
+            'renal_adjustment': result_dict.get('renal_adjustment') if result_dict.get('renal_adjustment') else None,
+            'general_considerations': result_dict.get('general_considerations') if result_dict.get('general_considerations') else None,
+            'is_combined': result_dict.get('is_combined', False),
+            'is_complete': result_dict.get('is_complete', False)  # LLM determines this based on prompt
         }
         
+        # Ensure is_complete is always present
+        if 'is_complete' not in unified:
+            unified['is_complete'] = False
+        
         # Clean null strings
-        final_entry = _clean_null_strings(final_entry)
+        for key, value in unified.items():
+            if isinstance(value, str) and value.lower() in ['null', 'none', 'not specified', '']:
+                unified[key] = None
         
-        # Determine completeness: check if LLM provided it, otherwise calculate it
-        if medical_name in completeness_map:
-            final_entry['is_complete'] = completeness_map[medical_name]
-        else:
-            # Fallback: calculate completeness based on critical fields
-            final_entry['is_complete'] = (
-                final_entry.get('medical_name') is not None and
-                final_entry.get('coverage_for') is not None and
-                final_entry.get('dose_duration') is not None and
-                final_entry.get('route_of_administration') is not None and
-                final_entry.get('renal_adjustment') is not None and
-                final_entry.get('general_considerations') is not None
-            )
+        # Trust LLM's decision completely - if it returned null for dose_duration, that's the correct decision
+        # The LLM follows the prompt which instructs it to set dose_duration to null if incomplete
         
-        # Add to re-ranked category
-        antibiotics_result[final_category].append(final_entry)
-    
-    # Sort by source count within each category (no limits - include all)
-    def get_source_count(entry):
-        return len(entry.get('mentioned_in_sources', []))
-    
-    # Sort each category by source count (descending)
-    antibiotics_result['first_choice'].sort(key=get_source_count, reverse=True)
-    antibiotics_result['second_choice'].sort(key=get_source_count, reverse=True)
-    antibiotics_result['alternative_antibiotic'].sort(key=get_source_count, reverse=True)
-    
-    logger.info(f"After processing: {len(antibiotics_result['first_choice'])} first_choice, {len(antibiotics_result['second_choice'])} second_choice, {len(antibiotics_result['alternative_antibiotic'])} alternative")
-    
-    # Prepare resistance genes data - format same as antibiotics
-    resistance_genes_data = []
-    for rg_data in resistance_genes_to_unify:
-        all_entries = rg_data['entries']
-        normalized_name = rg_data['normalized_name']
-        gene_name = all_entries[0].get('detected_resistant_gene_name', normalized_name) if all_entries else normalized_name
+        return unified
         
-        resistance_genes_data.append({
-            'gene_name': gene_name,
-            'all_entries': all_entries
-        })
-    
-    # Process resistance genes separately
-    resistance_genes_result = []
-    
-    if resistance_genes_data:
-        # Build resistance genes list with same formatting as antibiotics
-        resistance_genes_text = []
-        for rg_data in resistance_genes_data:
-            gene_name = rg_data['gene_name']
-            all_entries = rg_data['all_entries']
-            
-            # Collect all entries data
-            entries_data = []
-            for entry in all_entries:
-                entries_data.append({
-                    'source': f"Source {entry.get('source_index', '?')}",
-                    'detected_resistant_gene_name': entry.get('detected_resistant_gene_name') or 'null',
-                    'potential_medication_class_affected': entry.get('potential_medication_class_affected') or 'null',
-                    'general_considerations': entry.get('general_considerations') or 'null'
-                })
-            
-            entries_text = "\n".join([
-                f"  {e['source']}: gene_name={e['detected_resistant_gene_name']}, medication_class={e['potential_medication_class_affected']}, considerations={e['general_considerations']}"
-                for e in entries_data
-            ])
-            
-            resistance_genes_text.append(f"{gene_name}:\n{entries_text}")
-        
-        resistance_genes_list = "\n\n".join(resistance_genes_text)
-        
-        logger.info(f"Preparing resistance genes prompt with {len(resistance_genes_data)} genes")
-        
-        # Format resistance genes for prompt context
-        from utils import get_resistance_genes_from_input
-        if state:
-            input_params_for_genes = state.get('input_parameters', {})
-        else:
-            input_params_for_genes = input_params
-        resistant_genes_list_for_prompt = get_resistance_genes_from_input(input_params_for_genes)
-        resistance_genes_context = f" ({', '.join(resistant_genes_list_for_prompt)})" if len(resistant_genes_list_for_prompt) > 1 else ""
-        
-        resistance_genes_prompt = f"""Synthesize resistance gene information for {pathogen_name} with {resistant_gene} resistance{resistance_genes_context}.
+    except RetryError as e:
+        logger.error(f"Unification failed after max attempts for {antibiotic_name}: {e}")
+        raise
 
-RESISTANCE GENES FROM SOURCES:
-{resistance_genes_list}
 
-PROCESS:
-1. GROUP: Identify same genes across sources → ONE unified entry with standard name
-2. UNIFY: Combine information from all sources
-
-FIELDS:
-- detected_resistant_gene_name: Standard name (e.g., "vanA"). Must match one of: {', '.join(resistant_genes_list_for_prompt) if resistant_genes_list_for_prompt else resistant_gene}
-- potential_medication_class_affected: Combine all affected antibiotic classes from all sources
-- general_considerations: Combine all including:
-  * Mechanism of resistance
-  * Clinical implications
-  * Treatment implications
-  * All clinical notes
-
-RULES:
-- Group same genes from different sources
-- Use ONLY data from provided sources (do not invent)
-- Fill gaps from other sources in group
-- Return ONE entry per unique gene
-- Use null (not strings) for missing information
-
-Return ALL unified resistance genes."""
-        
-        # Use structured output for resistance genes only
-        structured_llm_rg = llm.with_structured_output(UnifiedResistanceGenesResult)
-        
-        try:
-            logger.info("Invoking LLM for resistance genes synthesis...")
-            rg_result = structured_llm_rg.invoke(resistance_genes_prompt)
-            
-            if rg_result:
-                resistance_genes_result = [_clean_null_strings(entry.model_dump()) for entry in rg_result.resistance_genes]
-                logger.info(f"Resistance genes LLM returned: {len(resistance_genes_result)} genes")
-            else:
-                logger.warning("Resistance genes LLM returned None")
-        except Exception as e:
-            logger.error(f"Error during resistance genes synthesis: {e}", exc_info=True)
+def _determine_final_category(
+    entries: List[Dict[str, Any]],
+    total_sources: int
+) -> str:
+    """
+    Determine final category based on category distribution in entries.
     
-    # Combine results
-    return {
-        'first_choice': antibiotics_result['first_choice'],
-        'second_choice': antibiotics_result['second_choice'],
-        'alternative_antibiotic': antibiotics_result['alternative_antibiotic'],
-        'resistance_genes': resistance_genes_result
+    Args:
+        entries: List of entries for this antibiotic
+        total_sources: Total number of sources
+        
+    Returns:
+        Final category: 'first_choice', 'second_choice', or 'alternative_antibiotic'
+    """
+    category_counts = {
+        'first_choice': 0,
+        'second_choice': 0,
+        'alternative_antibiotic': 0,
+        'not_known': 0
     }
+    
+    for entry in entries:
+        category = entry.get('original_category', 'not_known')
+        if category in category_counts:
+            category_counts[category] += 1
+    
+    # Calculate percentages (exclude not_known)
+    total_valid = category_counts['first_choice'] + category_counts['second_choice'] + category_counts['alternative_antibiotic']
+    
+    if total_valid == 0:
+        return 'alternative_antibiotic'
+    
+    first_pct = category_counts['first_choice'] / total_valid
+    second_pct = category_counts['second_choice'] / total_valid
+    alt_pct = category_counts['alternative_antibiotic'] / total_valid
+    
+    # Use weighted scoring (first_choice = 4, second_choice = 3, alternative = 2)
+    weighted_scores = {
+        'first_choice': category_counts['first_choice'] * 4.0,
+        'second_choice': category_counts['second_choice'] * 3.0,
+        'alternative_antibiotic': category_counts['alternative_antibiotic'] * 2.0
+    }
+    
+    # Strong consensus (>60%)
+    if first_pct > 0.6:
+        return 'first_choice'
+    elif second_pct > 0.6:
+        return 'second_choice'
+    elif alt_pct > 0.6:
+        return 'alternative_antibiotic'
+    
+    # Weighted majority
+    max_category = max(weighted_scores.items(), key=lambda x: x[1])[0]
+    return max_category
+
+
+def _unify_resistance_genes_with_llm(
+    resistance_genes_data: List[Dict[str, Any]],
+    retry_delay: float = 2.0
+) -> List[Dict[str, Any]]:
+    """
+    Unify resistance genes using LLM - processes all genes in one go.
+    
+    Args:
+        resistance_genes_data: List of resistance gene entries from different sources
+        retry_delay: Initial delay between retries in seconds
+        
+    Returns:
+        List of unified resistance gene entries
+    """
+    if not resistance_genes_data:
+        return []
+    
+    # Group by gene name (keep original names, don't normalize)
+    gene_groups = defaultdict(list)
+    for entry in resistance_genes_data:
+        gene_name = entry.get('detected_resistant_gene_name', '').strip()
+        if gene_name:
+            gene_groups[gene_name].append(entry)
+    
+    # Build prompt with all genes grouped
+    genes_text = []
+    for gene_name, entries in gene_groups.items():
+        entries_list = []
+        for i, entry in enumerate(entries, 1):
+            entries_list.append(
+                f"Source {i}:\n"
+                f"  detected_resistant_gene_name: {entry.get('detected_resistant_gene_name', 'null')}\n"
+                f"  potential_medication_class_affected: {entry.get('potential_medication_class_affected') or 'null'}\n"
+                f"  general_considerations: {entry.get('general_considerations') or 'null'}"
+            )
+        genes_text.append(f"{gene_name}:\n" + "\n\n".join(entries_list))
+    
+    genes_list = "\n\n".join(genes_text)
+    
+    # Use prompt template from prompts.py
+    prompt = RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE.format(
+        genes_list=genes_list
+    )
+
+    llm = create_llm()
+    if not llm:
+        logger.warning("LlamaIndex LLM not available, using first entry from each group")
+        unified_genes = []
+        for gene_name, entries in gene_groups.items():
+            if entries:
+                unified_genes.append(entries[0].copy())
+        return unified_genes
+    
+    def _perform_gene_unification():
+        # Use LlamaIndex with schema from schemas.py
+        program = LLMTextCompletionProgram.from_defaults(
+            output_cls=UnifiedResistanceGenesResult,
+            llm=llm,
+            prompt_template_str="{input_str}",
+            verbose=False
+        )
+        result = program(input_str=prompt)
+        if not result:
+            return None
+        result_dict = result.model_dump()
+        resistance_genes = result_dict.get('resistance_genes', [])
+        if not resistance_genes:
+            return []  # Empty list is valid, but we'll retry if needed
+        return [clean_null_strings(entry) for entry in resistance_genes]
+    
+    try:
+        unified_genes = retry_with_max_attempts(
+            operation=_perform_gene_unification,
+            operation_name="LLM resistance gene unification",
+            max_attempts=5,
+            retry_delay=retry_delay,
+            should_retry_on_empty=True
+        )
+        return unified_genes
+        
+    except RetryError as e:
+        logger.error(f"Resistance gene unification failed after max attempts: {e}")
+        raise
 
 
 def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Synthesize node that aggregates antibiotics from all sources and creates a result.
+    Synthesize node that groups antibiotics by name and unifies entries using LLM.
     
     Args:
         state: Pipeline state dictionary
@@ -722,28 +314,16 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 }
             }
         
-        # Get LangChain ChatModel - Ollama
-        from config import get_ollama_llm
-        llm = get_ollama_llm()
-        
-        # Aggregate antibiotics by normalized name and category
-        aggregated = {
-            'first_choice': defaultdict(lambda: {'count': 0, 'entries': []}),
-            'second_choice': defaultdict(lambda: {'count': 0, 'entries': []}),
-            'alternative_antibiotic': defaultdict(lambda: {'count': 0, 'entries': []})
-        }
-        
-        # Aggregate resistance genes
-        resistance_genes_agg = defaultdict(lambda: {'count': 0, 'entries': []})
-        
-        # Process all sources
         total_sources = len(source_results)
+        
+        antibiotic_groups = defaultdict(list)
         
         for source_result in source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
+            source_index = source_result.get('source_index', 0)
             
-            # Process each category
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
+            # Process all categories
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
                 antibiotics = therapy_plan.get(category, [])
                 if not isinstance(antibiotics, list):
                     continue
@@ -756,79 +336,107 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if not medical_name:
                         continue
                     
-                    # Normalize name for comparison (even though names should already be normalized)
-                    normalized_name = _normalize_antibiotic_name(medical_name)
+                    # Normalize name for grouping
+                    normalized_name = normalize_antibiotic_name(medical_name)
                     if not normalized_name:
                         continue
                     
-                    # Use normalized name as key for aggregation to ensure proper grouping
-                    aggregated[category][normalized_name]['count'] += 1
-                    aggregated[category][normalized_name]['entries'].append({
+                    # Get route_of_administration for grouping key
+                    route = antibiotic.get('route_of_administration', '').strip() if antibiotic.get('route_of_administration') else ''
+                    # Normalize route (handle None, empty strings, etc.)
+                    route_key = route if route else 'null'
+                    
+                    # Create grouping key: (normalized_name, route)
+                    # This ensures same drug with different routes are in different groups
+                    group_key = (normalized_name, route_key)
+                    
+                    # Add entry with source info
+                    antibiotic_groups[group_key].append({
                         **antibiotic,
-                        'source_index': source_result.get('source_index', 0),
+                        'source_index': source_index,
                         'original_category': category
                     })
             
-            # Process resistance genes
+        logger.info(f"Grouped {len(antibiotic_groups)} unique antibiotics from {total_sources} sources")
+        
+        # Get progress callback from metadata
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
+        # Step 2: Unify antibiotics - use LLM if count > 1, otherwise use as-is
+        unified_antibiotics = []
+        total_antibiotics = len(antibiotic_groups)
+        unified_count = 0
+        
+        for group_key, entries in antibiotic_groups.items():
+            normalized_name, route_key = group_key
+            # Get source indices for this antibiotic
+            source_indices = sorted(set(e.get('source_index', 0) for e in entries if e.get('source_index', 0) > 0))
+            
+            # Get the route for this group (all entries should have the same route)
+            route = entries[0].get('route_of_administration', '') if entries else ''
+            
+            # Unify if multiple entries
+            if len(entries) > 1:
+                logger.info(f"Unifying {len(entries)} entries for {normalized_name} with route {route}")
+                unified_entry = _unify_antibiotic_group_with_llm(
+                    antibiotic_name=entries[0].get('medical_name', normalized_name),
+                    entries=entries,
+                    route_of_administration=route
+                )
+            else:
+                # Single entry - use as-is
+                unified_entry = entries[0].copy()
+                unified_entry.pop('source_index', None)
+                unified_entry.pop('original_category', None)
+                # Ensure is_complete is always present (default to False if not set)
+                if 'is_complete' not in unified_entry:
+                    unified_entry['is_complete'] = False
+            
+            # Determine final category based on category distribution
+            final_category = _determine_final_category(entries, total_sources)
+            
+            # Add source information
+            unified_entry['mentioned_in_sources'] = source_indices
+            
+            # Add to appropriate category
+            unified_entry['final_category'] = final_category
+            unified_antibiotics.append(unified_entry)
+            
+            # Emit progress for this antibiotic
+            if progress_callback and total_antibiotics > 0:
+                unified_count += 1
+                sub_progress = (unified_count / total_antibiotics) * 100.0
+                progress_callback('synthesize', sub_progress, f'Unified {unified_count}/{total_antibiotics} antibiotics')
+        
+        # Step 3: Organize into categories
+        result_categories = {
+            'first_choice': [],
+            'second_choice': [],
+            'alternative_antibiotic': []
+        }
+        
+        for ab in unified_antibiotics:
+            category = ab.pop('final_category', 'alternative_antibiotic')
+            # Ensure is_complete is always present in every entry
+            if 'is_complete' not in ab:
+                ab['is_complete'] = False
+            if category in result_categories:
+                result_categories[category].append(ab)
+        
+        # Step 4: Process resistance genes
+        resistance_genes_all = []
+        for source_result in source_results:
             resistance_genes = source_result.get('pharmacist_analysis_on_resistant_gene', [])
             if isinstance(resistance_genes, list):
-                for gene_entry in resistance_genes:
-                    if not isinstance(gene_entry, dict):
-                        continue
-                    
-                    gene_name = gene_entry.get('detected_resistant_gene_name', '').strip()
-                    if not gene_name:
-                        continue
-                    
-                    normalized_gene = _normalize_antibiotic_name(gene_name)
-                    resistance_genes_agg[normalized_gene]['count'] += 1
-                    resistance_genes_agg[normalized_gene]['entries'].append(gene_entry)
+                resistance_genes_all.extend(resistance_genes)
         
-        # Aggregate antibiotics across ALL categories
-        cross_category_aggregated = defaultdict(lambda: {'total_count': 0, 'all_entries': []})
+        unified_resistance_genes = []
+        if resistance_genes_all:
+            logger.info(f"Unifying {len(resistance_genes_all)} resistance gene entries")
+            unified_resistance_genes = _unify_resistance_genes_with_llm(resistance_genes_all)
         
-        for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
-            for normalized_name, data in aggregated[category].items():
-                cross_category_aggregated[normalized_name]['total_count'] += data['count']
-                cross_category_aggregated[normalized_name]['all_entries'].extend(data['entries'])
-        
-        # Collect all antibiotics with their aggregated entries
-        antibiotics_to_unify = []
-        for normalized_name, data in cross_category_aggregated.items():
-            antibiotics_to_unify.append({
-                'normalized_name': normalized_name,
-                'mentioned_in_sources': sorted(set(e.get('source_index', 0) for e in data['all_entries'] if e.get('source_index', 0) > 0)),
-                'entries': data['all_entries']
-            })
-        
-        logger.info(f"Aggregated {len(antibiotics_to_unify)} unique antibiotics across all categories (total mentions: {sum(d['total_count'] for d in cross_category_aggregated.values())})")
-        
-        # Collect all resistance genes with their aggregated entries
-        resistance_genes_to_unify = []
-        sorted_genes = sorted(
-            resistance_genes_agg.items(),
-            key=lambda x: -x[1]['count']
-        )
-        for normalized_gene, data in sorted_genes:
-            resistance_genes_to_unify.append({
-                'normalized_name': normalized_gene,
-                'entries': data['entries']
-            })
-        
-        unified_result_data = _unify_all_with_llm(
-            antibiotics_to_unify,
-            resistance_genes_to_unify,
-            state.get('input_parameters', {}),
-            llm,
-            state
-        )
-        
-        unified_first_choice = unified_result_data['first_choice']
-        unified_second_choice = unified_result_data['second_choice']
-        unified_alternative = unified_result_data['alternative_antibiotic']
-        unified_resistance_genes = unified_result_data['resistance_genes']
-        
-        # Build a mapping from source_index to source_url
+        # Step 5: Convert source indices to URLs
         source_index_to_url = {}
         for source_result in source_results:
             source_index = source_result.get('source_index', 0)
@@ -836,36 +444,95 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if source_index > 0 and source_url:
                 source_index_to_url[source_index] = source_url
         
-        # Convert source indices to URLs for all antibiotics
         def convert_indices_to_urls(antibiotics_list):
             for ab in antibiotics_list:
                 if 'mentioned_in_sources' in ab:
-                    # Convert list of indices to list of URLs
                     ab['mentioned_in_sources'] = [
                         source_index_to_url.get(idx, '') 
                         for idx in ab['mentioned_in_sources'] 
                         if source_index_to_url.get(idx, '')
                     ]
         
-        convert_indices_to_urls(unified_first_choice)
-        convert_indices_to_urls(unified_second_choice)
-        convert_indices_to_urls(unified_alternative)
+        convert_indices_to_urls(result_categories['first_choice'])
+        convert_indices_to_urls(result_categories['second_choice'])
+        convert_indices_to_urls(result_categories['alternative_antibiotic'])
         
+        # Build result
         result = {
             'antibiotic_therapy_plan': {
-                'first_choice': unified_first_choice,
-                'second_choice': unified_second_choice,
-                'alternative_antibiotic': unified_alternative
+                'first_choice': result_categories['first_choice'],
+                'second_choice': result_categories['second_choice'],
+                'alternative_antibiotic': result_categories['alternative_antibiotic']
             },
             'pharmacist_analysis_on_resistant_gene': unified_resistance_genes
         }
         
-        logger.info(f"Synthesized {len(unified_first_choice)} first_choice, {len(unified_second_choice)} second_choice, {len(unified_alternative)} alternative antibiotics from {total_sources} sources")
+        logger.info(
+            f"Synthesized {len(unified_antibiotics)} antibiotics: "
+            f"{len(result_categories['first_choice'])} first_choice, "
+            f"{len(result_categories['second_choice'])} second_choice, "
+            f"{len(result_categories['alternative_antibiotic'])} alternative"
+        )
+        
+        # Save results to file
+        input_params = state.get('input_parameters', {})
+        icd_transformation = state.get('icd_transformation', {})
+        _save_synthesize_results(input_params, result, icd_transformation)
         
         return {
             'result': result
         }
         
+    except RetryError as e:
+        error_msg = f"Synthesize node failed: {e.operation_name} - {str(e)}"
+        logger.error(error_msg)
+        # Record error in state and stop pipeline
+        errors = state.get('errors', [])
+        errors.append(error_msg)
+        raise Exception(error_msg) from e
     except Exception as e:
         logger.error(f"Error in synthesize_node: {e}", exc_info=True)
+        # Record error in state
+        errors = state.get('errors', [])
+        errors.append(f"Synthesize node error: {str(e)}")
         raise
+
+
+def _save_synthesize_results(input_params: Dict, result: Dict, icd_transformation: Dict = None) -> None:
+    """Save synthesize results to file."""
+    try:
+        from config import get_output_config
+        output_config = get_output_config()
+        
+        # Check if saving is enabled
+        if not output_config.get('save_enabled', True):
+            logger.debug("Saving synthesize results disabled (production mode)")
+            return
+        
+        output_dir = Path(output_config.get('directory', 'output'))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_file = output_dir / "synthesize_result.json"
+        
+        output_data = {
+            'input_parameters': input_params,
+            'result': result
+        }
+        
+        # Include ICD transformation with formatted codes (Code (Name))
+        if icd_transformation:
+            from utils import get_icd_names_from_state
+            # Create a temporary state dict to get formatted ICD codes
+            temp_state = {'icd_transformation': icd_transformation}
+            icd_codes_formatted = get_icd_names_from_state(temp_state)
+            output_data['icd_transformation'] = {
+                **icd_transformation,
+                'icd_codes_formatted': icd_codes_formatted  # Add formatted string with names
+            }
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Synthesize results saved to: {output_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save synthesize results: {e}")

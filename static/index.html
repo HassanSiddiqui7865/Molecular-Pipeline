@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Molecular Pipeline - Antibiotic Therapy Recommendations</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        #resultContent ul {
+            text-align: left !important;
+            margin-left: 0 !important;
+            padding-left: 0 !important;
+            width: 100% !important;
+        }
+        #resultContent li {
+            text-align: left !important;
+            margin-left: 0 !important;
+            padding-left: 24px !important;
+            min-height: 100px !important;
+        }
+        #resultContent li .antibiotic-header {
+            text-align: left !important;
+            margin-left: 0 !important;
+        }
+        #resultContent li .antibiotic-name {
+            text-align: left !important;
+            margin-left: 0 !important;
+        }
+        .first-line-badge {
+            margin-left: 0 !important;
+            margin-right: 12px !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Molecular Pipeline</h1>
+            <p>Antibiotic Therapy Recommendations Generator</p>
+        </header>
+
+        <div class="main-content">
+            <div class="input-section">
+                <h2>Input Parameters</h2>
+                <div class="panel-selector" style="margin-bottom: 15px;">
+                    <label for="panelSelect" style="display: block; margin-bottom: 5px; font-weight: bold;">Select Panel:</label>
+                    <select id="panelSelect" style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">-- Select Panel --</option>
+                        <option value="Blood">Blood</option>
+                        <option value="Urine">Urine</option>
+                        <option value="Sputum">Sputum</option>
+                        <option value="Respiratory">Respiratory</option>
+                        <option value="CSF">CSF</option>
+                        <option value="Wound">Wound</option>
+                        <option value="Nail">Nail</option>
+                        <option value="Skin">Skin</option>
+                        <option value="Vaginal">Vaginal</option>
+                        <option value="RT-PCR Monkeypox Virus (F3L gene) RT-PCR">RT-PCR Monkeypox Virus (F3L gene) RT-PCR</option>
+                        <option value="SARS - CoV2 + RSV + INFLUENZA A & B">SARS - CoV2 + RSV + INFLUENZA A & B</option>
+                        <option value="SARS CoV2 ONLY">SARS CoV2 ONLY</option>
+                        <option value="RESPIRATORY TRACT PANEL (RPP)">RESPIRATORY TRACT PANEL (RPP)</option>
+                        <option value="UTI">UTI</option>
+                        <option value="FUNGAL, SEPSIS & WOUND PANEL">FUNGAL, SEPSIS & WOUND PANEL</option>
+                        <option value="SEXUALLY TRANSMITTED INFECTION PANEL (STI)">SEXUALLY TRANSMITTED INFECTION PANEL (STI)</option>
+                        <option value="HELICOBACTER PYLORI">HELICOBACTER PYLORI</option>
+                        <option value="GASTROENTERITIS PANEL">GASTROENTERITIS PANEL</option>
+                        <option value="Womens Health Panel (Vaginosis)">Womens Health Panel (Vaginosis)</option>
+                    </select>
+                </div>
+                <h3 style="margin-top: 20px; margin-bottom: 10px;">JSON Input</h3>
+                <textarea id="jsonInput" placeholder='Enter JSON input (panel will be added automatically), e.g.:
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Staphylococcus aureus",
+      "pathogen_count": "10^3 CFU/ML"
+    }
+  ],
+  "resistant_genes": ["mecA"],
+  "severity_codes": ["A41.2"],
+  "age": 32,
+  "systemic": true
+}'></textarea>
+                <div class="button-group">
+                    <button id="loadExample" class="btn btn-secondary">Load Example</button>
+                    <button id="runPipeline" class="btn btn-primary">Run Pipeline</button>
+                </div>
+            </div>
+
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <h2>Pipeline Progress</h2>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                <div class="progress-log" id="progressLog"></div>
+            </div>
+
+            <div class="result-section" id="resultSection" style="display: none;">
+                <h2>Results</h2>
+                <div class="result-actions">
+                    <button id="downloadJson" class="btn btn-secondary">Download JSON</button>
+                    <button id="downloadPdf" class="btn btn-secondary">Download PDF</button>
+                    <button id="viewJson" class="btn btn-secondary">View Raw JSON</button>
+                </div>
+                <div id="resultContent"></div>
+            </div>
+
+            <div class="sessions-section">
+                <h2>Past Executions</h2>
+                <div class="sessions-controls">
+                    <button id="refreshSessions" class="btn btn-secondary">Refresh</button>
+                </div>
+                <div class="sessions-table-container">
+                    <table class="sessions-table" id="sessionsTable">
+                        <thead>
+                            <tr>
+                                <th>Session ID</th>
+                                <th>Status</th>
+                                <th>Progress</th>
+                                <th>Stage</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sessionsTableBody">
+                            <tr>
+                                <td colspan="6" class="loading">Loading sessions...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
+

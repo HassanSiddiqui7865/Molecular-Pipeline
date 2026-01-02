@@ -12,17 +12,32 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 _env_loaded = False
+_env_file_used = None
 
 def _ensure_env_loaded():
-    """Ensure .env file is loaded."""
-    global _env_loaded
+    """Ensure .env file is loaded. Supports .env.dev for development and .env for production."""
+    global _env_loaded, _env_file_used
     if not _env_loaded:
         # Look for .env file in project root (parent of src)
         project_root = Path(__file__).parent.parent
-        env_path = project_root / '.env'
+        
+        # Check for environment mode from ENV environment variable
+        # If ENV=dev, use .env.dev; otherwise use .env
+        env_mode = os.getenv('ENV', '').lower()
+        
+        if env_mode == 'dev':
+            env_path = project_root / '.env.dev'
+            if not env_path.exists():
+                # Fallback to .env if .env.dev doesn't exist
+                env_path = project_root / '.env'
+                logger.warning(f".env.dev not found, falling back to .env")
+        else:
+            env_path = project_root / '.env'
+        
         if env_path.exists():
             load_dotenv(env_path)
-            logger.info(f"Loaded environment variables from {env_path}")
+            _env_file_used = env_path
+            logger.info(f"Loaded environment variables from {env_path} (mode: {env_mode or 'production'})")
         else:
             logger.warning(f".env file not found at {env_path}, using system environment variables")
         _env_loaded = True
@@ -52,34 +67,24 @@ def get_output_config() -> Dict[str, Any]:
         Dictionary with output configuration
     """
     _ensure_env_loaded()
+    # Check environment mode - disable saving in production
+    env_mode = os.getenv('ENV', '').lower()
+    is_production = env_mode != 'dev'
+    
+    # Check if saving is explicitly disabled via env var, or if in production mode
+    save_enabled_env = os.getenv('SAVE_OUTPUT_TO_DISK', '').lower()
+    if save_enabled_env:
+        # Explicitly set via env var
+        save_enabled = save_enabled_env == 'true'
+    else:
+        # Default: enabled in dev, disabled in production
+        save_enabled = not is_production
+    
     return {
         'directory': os.getenv('OUTPUT_DIRECTORY', 'output'),
-        'filename': os.getenv('OUTPUT_FILENAME', 'pathogen_info_output.json')
+        'filename': os.getenv('OUTPUT_FILENAME', 'pathogen_info_output.json'),
+        'save_enabled': save_enabled
     }
-
-
-def get_ollama_llm() -> Any:
-    """
-    Get LangChain BaseChatModel for Ollama.
-    
-    Returns:
-        LangChain BaseChatModel instance
-    """
-    from langchain_ollama import ChatOllama
-    from langchain_core.language_models.chat_models import BaseChatModel
-    
-    ollama_config = get_ollama_config()
-    model = ollama_config['model'].replace('ollama/', '')
-    base_url = ollama_config['api_base']
-    
-    llm: BaseChatModel = ChatOllama(
-        model=model,
-        base_url=base_url,
-        format='json',
-        temperature=ollama_config['temperature'],
-    )
-    
-    return llm
 
 
 def get_perplexity_config() -> Dict[str, Any]:
@@ -92,36 +97,10 @@ def get_perplexity_config() -> Dict[str, Any]:
     _ensure_env_loaded()
     return {
         'api_key': os.getenv('PERPLEXITY_API_KEY', ''),
-        'max_tokens': int(os.getenv('PERPLEXITY_MAX_TOKENS', '50000')),
+        'max_tokens': int(os.getenv('PERPLEXITY_MAX_TOKENS', '5000')),
         'max_tokens_per_page': int(os.getenv('PERPLEXITY_MAX_TOKENS_PER_PAGE', '4096')),
-        'max_search_results': int(os.getenv('PERPLEXITY_MAX_SEARCH_RESULTS', '10'))
+        'max_search_results': int(os.getenv('PERPLEXITY_MAX_SEARCH_RESULTS', '5'))
     }
-
-
-def get_openai_llm(model: str = "gpt-4o-mini", temperature: float = 0) -> Any:
-    """
-    Get LangChain ChatOpenAI instance.
-    
-    Args:
-        model: OpenAI model name (default: "gpt-4o-mini")
-        temperature: Temperature for the model (default: 0)
-    
-    Returns:
-        LangChain ChatOpenAI instance
-    """
-    from langchain_openai import ChatOpenAI
-    
-    _ensure_env_loaded()
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment variables. Please set it in .env file")
-    
-    llm = ChatOpenAI(
-        model=model,
-        temperature=temperature
-    )
-    
-    return llm
 
 
 def get_database_config() -> Dict[str, Any]:
@@ -137,9 +116,7 @@ def get_database_config() -> Dict[str, Any]:
         'ssh_host': os.getenv('DB_SSH_HOST', ''),
         'ssh_port': int(os.getenv('DB_SSH_PORT', '22')),
         'ssh_username': os.getenv('DB_SSH_USERNAME', ''),
-        'ssh_password': os.getenv('DB_SSH_PASSWORD', ''),
-        'ssh_key_path': os.getenv('DB_SSH_KEY_PATH', ''),  # Path to SSH private key file (optional, alternative to password)
-        'ssh_key_passphrase': os.getenv('DB_SSH_KEY_PASSPHRASE', ''),  # Passphrase for SSH key (if key is encrypted)
+        'ssh_password': os.getenv('DB_SSH_PASSWORD', ''),  # Used for both SSH password and key passphrase
         
         # Database Configuration (after SSH tunnel)
         'db_type': 'postgresql',  # Only PostgreSQL is supported

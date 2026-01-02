@@ -1,1202 +1,873 @@
 """
-PDF Export Module using Platypus (ReportLab) - Exact design matching reference image
+PDF Export Module using xhtml2pdf (pisa) - Pure Python HTML/CSS to PDF conversion
+No system dependencies, works on all platforms
 """
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
+import html
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
 try:
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.units import inch, cm
-    from reportlab.lib.colors import HexColor, white, black, lightgrey
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Flowable
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
-    REPORTLAB_AVAILABLE = True
+    from xhtml2pdf import pisa
+    XHTML2PDF_AVAILABLE = True
 except ImportError:
-    REPORTLAB_AVAILABLE = False
-    logger.warning("ReportLab not available. Install with: pip install reportlab")
+    XHTML2PDF_AVAILABLE = False
+    logger.warning("xhtml2pdf (pisa) not available. Install with: pip install xhtml2pdf")
 
 
 def _format_text_field(text: Optional[str]) -> str:
-    """Format any text field to handle None values."""
+    """Format any text field to handle None values and escape HTML."""
     if text is None:
-        return "-"
+        return "N/A"
     text_str = str(text).strip()
-    return text_str if text_str else "-"
+    if not text_str:
+        return "N/A"
+    return html.escape(text_str)
 
 
-def _create_medication_section(data: Dict[str, Any], styles) -> list:
-    """
-    Create medication section exactly matching the reference image.
-    Extracts first_choice, second_choice, and alternative_antibiotic from data.
-    """
-    elements = []
-    
-    # Add a little space before medication section
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # Create medication header with blue background - FIXED: Blue header
-    med_header_style = ParagraphStyle(
-        'MedHeader',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=12,
-        textColor=white,
-        alignment=TA_CENTER,
-        spaceAfter=6,
-        spaceBefore=0
-    )
-    
-    # Create blue header for "MEDICATION RECOMMENDATIONS"
-    med_header_table = Table([[Paragraph("MEDICATION RECOMMENDATIONS", med_header_style)]], 
-                             colWidths=[7.5 * inch])
-    med_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Same blue as main header
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    
-    elements.append(med_header_table)
-    elements.append(Spacer(1, 0.1 * inch))
-    
-    # Import fix_text_encoding for handling Unicode issues
-    from utils import fix_text_encoding
-    
-    # Get antibiotic therapy plan from result (handle both structures)
+def _create_html_template(data: Dict[str, Any]) -> str:
+    """Create HTML template for the PDF report."""
+    input_params = data.get('input_parameters', {})
     result = data.get('result', {})
     therapy_plan = result.get('antibiotic_therapy_plan', {})
     
-    # If not found in result, try direct access
-    if not therapy_plan:
-        therapy_plan = data.get('antibiotic_therapy_plan', {})
-    
-    # Extract antibiotics from each category
-    first_choice_list = therapy_plan.get('first_choice', [])
-    second_choice_list = therapy_plan.get('second_choice', [])
-    alternative_list = therapy_plan.get('alternative_antibiotic', [])
-    
-    # Debug logging
-    logger.info(f"Found {len(first_choice_list)} first_choice, {len(second_choice_list)} second_choice, {len(alternative_list)} alternative antibiotics")
-    
-    # Convert antibiotic data to medication format
-    medications = []
-    
-    # Add first choice antibiotics
-    for i, ab in enumerate(first_choice_list):
-        if ab.get('medical_name'):
-            med = {
-                'name': ab.get('medical_name', ''),
-                'route': ab.get('route_of_administration', ''),
-                'dose': ab.get('dose_duration', ''),
-                'coverage': ab.get('coverage_for', ''),
-                'renal_adjustment': ab.get('renal_adjustment', ''),
-                'considerations': ab.get('general_considerations', ''),
-                'is_or_option': i > 0,  # "OR" after first item within category
-                'line_type': 'First' if i == 0 else '',  # Tag only on first medication
-                'show_tag': i == 0,  # Show tag only for first medication in category
-                'category': 'first_choice'  # Track category for spacing
-            }
-            medications.append(med)
-    
-    # Add second choice antibiotics
-    for i, ab in enumerate(second_choice_list):
-        if ab.get('medical_name'):
-            med = {
-                'name': ab.get('medical_name', ''),
-                'route': ab.get('route_of_administration', ''),
-                'dose': ab.get('dose_duration', ''),
-                'coverage': ab.get('coverage_for', ''),
-                'renal_adjustment': ab.get('renal_adjustment', ''),
-                'considerations': ab.get('general_considerations', ''),
-                'is_or_option': i > 0,  # "OR" after first item within category
-                'line_type': 'Second' if i == 0 else '',  # Tag only on first medication
-                'show_tag': i == 0,  # Show tag only for first medication in category
-                'category': 'second_choice'
-            }
-            medications.append(med)
-    
-    # Add alternative antibiotics
-    for i, ab in enumerate(alternative_list):
-        if ab.get('medical_name'):
-            med = {
-                'name': ab.get('medical_name', ''),
-                'route': ab.get('route_of_administration', ''),
-                'dose': ab.get('dose_duration', ''),
-                'coverage': ab.get('coverage_for', ''),
-                'renal_adjustment': ab.get('renal_adjustment', ''),
-                'considerations': ab.get('general_considerations', ''),
-                'is_or_option': i > 0,  # "OR" after first item within category
-                'line_type': 'Alternate' if i == 0 else '',  # Tag only on first medication
-                'show_tag': i == 0,  # Show tag only for first medication in category
-                'category': 'alternative_antibiotic'
-            }
-            medications.append(med)
-    
-    # If no medications found, return empty (don't show section)
-    if not medications:
-        return elements
-    
-    # Styles for medication section
-    med_table_header_style = ParagraphStyle(
-        'MedTableHeader',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=10,
-        alignment=TA_CENTER,
-        textColor=white,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    med_name_style = ParagraphStyle(
-        'MedName',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=9,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    med_data_style = ParagraphStyle(
-        'MedData',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    coverage_style = ParagraphStyle(
-        'Coverage',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        textColor=HexColor('#FF0000'),  # Red text
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    considerations_style = ParagraphStyle(
-        'Considerations',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    or_header_style = ParagraphStyle(
-        'OrHeader',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceBefore=4,
-        spaceAfter=4
-    )
-    
-    # Style for the line type tag (First Line, Second Line, Alternate)
-    line_tag_style = ParagraphStyle(
-        'LineTag',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=8,
-        textColor=white,
-        alignment=TA_CENTER,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    # Create each medication table
-    for i, med in enumerate(medications):
-        # Add "OR" header if this medication is marked as needing "OR"
-        if med.get('is_or_option', False):
-            elements.append(Paragraph("OR", or_header_style))
-            elements.append(Spacer(1, 0.05 * inch))
-        
-        # Get line type tag (First Line, Second Line, or Alternate)
-        line_type = med.get('line_type', '')
-        show_tag = med.get('show_tag', False)
-        
-        # Create medication header row
-        if show_tag:
-            # With tag column
-            header_data = [
-                '',  # Empty cell for tag column (will be styled separately)
-                Paragraph("Medication", med_table_header_style),
-                Paragraph("Route", med_table_header_style),
-                Paragraph("Dose", med_table_header_style)
-            ]
+    # Get ICD codes with names
+    from utils import get_icd_names_from_state, get_pathogens_from_input, format_pathogens, get_resistance_genes_from_input, format_resistance_genes
+    icd_code_names = get_icd_names_from_state(data) if isinstance(data, dict) else 'N/A'
+    if not icd_code_names or icd_code_names == 'not specified' or icd_code_names == 'N/A':
+        severity_codes = input_params.get('severity_codes', [])
+        if severity_codes:
+            icd_code_names = ', '.join(severity_codes) if isinstance(severity_codes, list) else str(severity_codes)
         else:
-            # Without tag column - regular 3-column header
-            header_data = [
-                Paragraph("Medication", med_table_header_style),
-                Paragraph("Route", med_table_header_style),
-                Paragraph("Dose", med_table_header_style)
-            ]
-        
-        # Create medication data row (using fix_text_encoding for Unicode issues)
-        med_name = fix_text_encoding(med.get('name', ''))
-        med_route = fix_text_encoding(med.get('route', ''))
-        med_dose = fix_text_encoding(med.get('dose', ''))
-        
-        if show_tag:
-            # Tag cell with line type
-            tag_cell = Paragraph(line_type, line_tag_style)
-            
-            med_data_row = [
-                tag_cell,  # Tag column
-                Paragraph(_format_text_field(med_name), med_name_style),
-                Paragraph(_format_text_field(med_route), med_data_style),
-                Paragraph(_format_text_field(med_dose), med_data_style)
-            ]
-        else:
-            # Regular 3-column row (no tag)
-            med_data_row = [
-                Paragraph(_format_text_field(med_name), med_name_style),
-                Paragraph(_format_text_field(med_route), med_data_style),
-                Paragraph(_format_text_field(med_dose), med_data_style)
-            ]
-        
-        # Create coverage row
-        coverage_text = med.get('coverage', '')
-        if coverage_text:
-            coverage_text = fix_text_encoding(coverage_text)
-            if not coverage_text.startswith('Coverage For:'):
-                coverage_text = 'Coverage For: ' + coverage_text
-        else:
-            coverage_text = ''
-        
-        if show_tag:
-            # With tag column
-            coverage_row = [
-                '',  # Empty cell for tag column
-                Paragraph(coverage_text, coverage_style) if coverage_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        else:
-            # Regular 3-column row (no tag)
-            coverage_row = [
-                Paragraph(coverage_text, coverage_style) if coverage_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        
-        # Build considerations text (separate from renal_adjustment)
-        considerations_text = med.get('considerations', '')
-        if considerations_text:
-            considerations_text = fix_text_encoding(considerations_text)
-            if not considerations_text.startswith('Considerations:'):
-                considerations_text = 'Considerations: ' + considerations_text
-        else:
-            considerations_text = ''
-        
-        # Get renal_adjustment separately
-        renal_adjustment = med.get('renal_adjustment', '')
-        if renal_adjustment:
-            renal_adjustment = fix_text_encoding(renal_adjustment)
-            if not renal_adjustment.startswith('Renal Adjustment:'):
-                renal_adjustment_text = 'Renal Adjustment: ' + renal_adjustment
-            else:
-                renal_adjustment_text = renal_adjustment
-        else:
-            renal_adjustment_text = ''
-        
-        # Create considerations row
-        if show_tag:
-            # With tag column
-            considerations_row = [
-                '',  # Empty cell for tag column
-                Paragraph(considerations_text, considerations_style) if considerations_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        else:
-            # Regular 3-column row (no tag)
-            considerations_row = [
-                Paragraph(considerations_text, considerations_style) if considerations_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        
-        # Create renal_adjustment row (separate)
-        if show_tag:
-            # With tag column
-            renal_row = [
-                '',  # Empty cell for tag column
-                Paragraph(renal_adjustment_text, considerations_style) if renal_adjustment_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        else:
-            # Regular 3-column row (no tag)
-            renal_row = [
-                Paragraph(renal_adjustment_text, considerations_style) if renal_adjustment_text else '',
-                '',  # Empty cell for Route column
-                ''   # Empty cell for Dose column
-            ]
-        
-        # Build table data
-        table_data = [header_data, med_data_row, coverage_row, considerations_row, renal_row]
-        
-        # Calculate column widths based on whether we have tag or not
-        if show_tag:
-          
-            col_widths = [0.6 * inch, 3.3 * inch, 1.1 * inch, 2.5 * inch]
-            num_columns = 4
-        else:
-           
-            col_widths = [3.9 * inch, 1.1 * inch, 2.5 * inch]
-            num_columns = 3
-        
-        # Create medication table
-        med_table = Table(table_data, colWidths=col_widths, hAlign='LEFT')
-        
-        # Style the medication table
-        med_table_style_list = []
-        
-        # Blue header for table - FIXED: Blue header for each medication table
-        if show_tag:
-            # With tag column
-            med_table_style_list.extend([
-                ('BACKGROUND', (1, 0), (3, 0), HexColor('#4472C4')),  # Blue header for data columns
-            ])
-        else:
-            # Regular 3 columns
-            med_table_style_list.extend([
-                ('BACKGROUND', (0, 0), (2, 0), HexColor('#4472C4')),  # Blue header for all columns
-            ])
-        
-        # Set alternating row backgrounds
-        if show_tag:
-            med_table_style_list.extend([
-                ('BACKGROUND', (0, 1), (0, 1), HexColor('#367FA9')),  # Blue tag background
-                ('BACKGROUND', (1, 1), (1, 1), HexColor('#F0F8FF')),  # Light blue for medication name
-                ('BACKGROUND', (2, 1), (3, 1), white),  # White for route and dose
-                ('BACKGROUND', (0, 2), (-1, 2), white),  # White for coverage
-                ('BACKGROUND', (0, 3), (-1, 3), white),  # White for considerations
-                ('BACKGROUND', (0, 4), (-1, 4), white),  # White for renal adjustment
-            ])
-        else:
-            med_table_style_list.extend([
-                ('BACKGROUND', (0, 1), (0, 1), HexColor('#F0F8FF')),  # Light blue for medication name
-                ('BACKGROUND', (1, 1), (2, 1), white),  # White for route and dose
-                ('BACKGROUND', (0, 2), (-1, 2), white),  # White for coverage
-                ('BACKGROUND', (0, 3), (-1, 3), white),  # White for considerations
-                ('BACKGROUND', (0, 4), (-1, 4), white),  # White for renal adjustment
-            ])
-        
-        # Cell borders
-        med_table_style_list.extend([
-            ('BOX', (0, 0), (-1, -1), 0.5, black),  # Outer border
-            ('INNERGRID', (0, 0), (-1, -1), 0.5, black),  # Inner grid
-        ])
-        
-        # Merge cells for coverage, considerations, and renal_adjustment rows
-        if show_tag:
-            # With tag column - coverage/considerations/renal span columns 1-3
-            med_table_style_list.extend([
-                ('SPAN', (1, 2), (3, 2)),  # Coverage row spans medication, route, dose columns
-                ('SPAN', (1, 3), (3, 3)),  # Considerations row spans medication, route, dose columns
-                ('SPAN', (1, 4), (3, 4)),  # Renal adjustment row spans medication, route, dose columns
-            ])
-        else:
-            # Regular 3 columns - coverage/considerations/renal span all columns
-            med_table_style_list.extend([
-                ('SPAN', (0, 2), (2, 2)),  # Coverage row spans all columns
-                ('SPAN', (0, 3), (2, 3)),  # Considerations row spans all columns
-                ('SPAN', (0, 4), (2, 4)),  # Renal adjustment row spans all columns
-            ])
-        
-        # Text alignment
-        if show_tag:
-            med_table_style_list.extend([
-                ('ALIGN', (1, 0), (3, 0), 'CENTER'),  # Header centered (skip tag column)
-                ('ALIGN', (0, 1), (0, 1), 'CENTER'),  # Tag column centered
-                ('ALIGN', (1, 1), (1, 1), 'LEFT'),    # Medication name left aligned
-                ('ALIGN', (2, 1), (2, 1), 'LEFT'),    # Route left aligned
-                ('ALIGN', (3, 1), (3, 1), 'LEFT'),    # Dose left aligned
-                ('ALIGN', (1, 2), (1, 2), 'LEFT'),    # Coverage left aligned
-                ('ALIGN', (1, 3), (1, 3), 'LEFT'),    # Considerations left aligned
-                ('ALIGN', (1, 4), (1, 4), 'LEFT'),    # Renal adjustment left aligned
-            ])
-        else:
-            med_table_style_list.extend([
-                ('ALIGN', (0, 0), (2, 0), 'CENTER'),  # Header centered
-                ('ALIGN', (0, 1), (0, 1), 'LEFT'),    # Medication name left aligned
-                ('ALIGN', (1, 1), (1, 1), 'LEFT'),    # Route left aligned
-                ('ALIGN', (2, 1), (2, 1), 'LEFT'),    # Dose left aligned
-                ('ALIGN', (0, 2), (0, 2), 'LEFT'),    # Coverage left aligned
-                ('ALIGN', (0, 3), (0, 3), 'LEFT'),    # Considerations left aligned
-                ('ALIGN', (0, 4), (0, 4), 'LEFT'),    # Renal adjustment left aligned
-            ])
-        
-        # Vertical alignment and padding
-        med_table_style_list.extend([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 4),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-            ('TOPPADDING', (0, 2), (-1, 2), 2),
-            ('BOTTOMPADDING', (0, 2), (-1, 2), 2),
-            ('TOPPADDING', (0, 3), (-1, 3), 2),
-            ('BOTTOMPADDING', (0, 3), (-1, 3), 2),
-            ('TOPPADDING', (0, 4), (-1, 4), 2),
-            ('BOTTOMPADDING', (0, 4), (-1, 4), 2),
-        ])
-        
-        # If showing tag, make it span the medication and coverage rows
-        if show_tag:
-            med_table_style_list.extend([
-                ('VALIGN', (0, 1), (0, 2), 'MIDDLE'),  # Tag cell vertically centered across rows
-            ])
-        
-        med_table_style = TableStyle(med_table_style_list)
-        med_table.setStyle(med_table_style)
-        
-        # Add the medication table to elements
-        elements.append(med_table)
-        
-        # Add small spacer between medication tables (except after last one)
-        if i < len(medications) - 1:
-            elements.append(Spacer(1, 0.1 * inch))
-    
-    return elements
-
-
-def _create_gene_section(data: Dict[str, Any], styles) -> list:
-    """
-    Create gene section displaying resistance gene information from pharmacist_analysis_on_resistant_gene.
-    """
-    elements = []
-    
-    # Add a little space before gene section
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # Create gene header with blue background (matching medication section theme)
-    gene_header_text = Paragraph(
-        "RESISTANCE GENE INFORMATION",
-        ParagraphStyle(
-            'GeneHeader',
-            parent=styles['Normal'],
-            fontName='Helvetica-Bold',
-            fontSize=12,
-            textColor=white,
-            alignment=TA_CENTER,
-            spaceAfter=0,
-            spaceBefore=0
-        )
-    )
-    
-    # Create header table with blue background
-    gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
-    gene_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Same blue as medication header
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    
-    elements.append(gene_header_table)
-    elements.append(Spacer(1, 0.1 * inch))
-    
-    # Get gene analysis data from pharmacist_analysis_on_resistant_gene
-    # Check both top-level and result level
-    gene_analysis_list = data.get('pharmacist_analysis_on_resistant_gene', [])
-    if not gene_analysis_list:
-        result = data.get('result', {})
-        gene_analysis_list = result.get('pharmacist_analysis_on_resistant_gene', [])
-    
-    # Debug logging
-    logger.info(f"Gene section - found {len(gene_analysis_list)} gene analysis entries")
-    
-    # If no gene analysis found, return empty section
-    if not gene_analysis_list:
-        logger.warning("Gene section - no pharmacist_analysis_on_resistant_gene found")
-        return elements
-    
-    # Format gene data using utils
-    from utils import fix_text_encoding
-    
-    # Create gene content styles
-    gene_label_style = ParagraphStyle(
-        'GeneLabel',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    gene_value_style = ParagraphStyle(
-        'GeneValue',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    gene_considerations_style = ParagraphStyle(
-        'GeneConsiderations',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
-    
-    # Process each gene analysis entry
-    for gene_analysis in gene_analysis_list:
-        gene_name = gene_analysis.get('detected_resistant_gene_name', '')
-        medication_classes = gene_analysis.get('potential_medication_class_affected', '')
-        considerations = gene_analysis.get('general_considerations', '')
-        
-        # Fix encoding issues
-        gene_name = fix_text_encoding(gene_name) if gene_name else '-'
-        medication_classes = fix_text_encoding(medication_classes) if medication_classes else '-'
-        considerations = fix_text_encoding(considerations) if considerations else '-'
-        
-        # Create table data for this gene
-        gene_table_data = [
-            [
-                Paragraph('<b>Detected Resistance Gene:</b>', gene_label_style),
-                Paragraph(_format_text_field(gene_name), gene_value_style)
-            ],
-            [
-                Paragraph('<b>Potential Medication Classes Affected:</b>', gene_label_style),
-                Paragraph(_format_text_field(medication_classes), gene_value_style)
-            ],
-            [
-                Paragraph('<b>General Considerations:</b>', gene_label_style),
-                Paragraph(_format_text_field(considerations), gene_considerations_style)
-            ]
-        ]
-        
-        # Calculate column widths
-        total_width = 7.5 * inch
-        col_widths = [2.5 * inch, 5.0 * inch]
-        
-        # Create gene table
-        gene_table = Table(gene_table_data, colWidths=col_widths, hAlign='LEFT')
-        
-        # Style the gene table with color theme
-        gene_table_style = TableStyle([
-            # Add borders for structure
-            ('BOX', (0, 0), (-1, -1), 0.5, black),  # Outer border
-            ('INNERGRID', (0, 0), (-1, -1), 0.5, black),  # Inner grid
-            
-            # Label column - light blue background (matching medication section theme)
-            ('BACKGROUND', (0, 0), (0, -1), HexColor('#E7F3FF')),  # Light blue for labels
-            
-            # Value column - white background
-            ('BACKGROUND', (1, 0), (1, -1), white),  # White for values
-            
-            # Text alignment
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            
-            # Cell padding
-            ('LEFTPADDING', (0, 0), (-1, -1), 4),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ])
-        
-        gene_table.setStyle(gene_table_style)
-        
-        # Add gene table to elements
-        elements.append(gene_table)
-        
-        # Add spacer between multiple gene entries (if any)
-        if gene_analysis != gene_analysis_list[-1]:
-            elements.append(Spacer(1, 0.1 * inch))
-    
-    return elements
-
-
-def _create_input_section(data: Dict[str, Any], styles) -> list:
-    """
-    Create the input section of the report exactly matching the reference image.
-    """
-    elements = []
-    
-    input_params = data.get('input_parameters', {})
-    
-    # Get sample type from state (no default - use what's provided)
-    sample = input_params.get('sample', '')
-    if not sample or sample.upper() == 'N/A':
-        sample = input_params.get('specimen_type', '') or input_params.get('specimen_site', '') or ''
-    # If still empty, use a generic placeholder
-    if not sample:
-        sample = 'SAMPLE'
-    
-    # Create blue header badge as a Table for padding control
-    header_text = Paragraph(
-        sample.upper(),
-        ParagraphStyle(
-            'CustomHeader',
-            parent=styles['Heading1'],
-            fontName='Helvetica-Bold',
-            fontSize=16,
-            textColor=white,
-            alignment=TA_CENTER,
-            leading=19,
-            spaceAfter=0,
-            spaceBefore=0
-        )
-    )
-    
-    # Create header table with a little top and bottom padding
-    header_table = Table([[header_text]], colWidths=[7.5 * inch])
-    header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue color
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),  # A little top padding
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),  # A little bottom padding
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    
-    # Add blue header badge
-    elements.append(header_table)
-    elements.append(Spacer(1, 0.05 * inch))  # Minimal spacing after header
-    
-    # Prepare data exactly as shown in reference image
-    # Column 1: Facility/Provider (left aligned)
-    facility_name = input_params.get('facility_name', '-')
-    provider = input_params.get('provider', '-')
-    phone = input_params.get('phone', '-')
-    
-    # Column 2: Patient Demographics (center aligned)
-    patient_name = input_params.get('patient_name', '-')
-    patient_dob = input_params.get('patient_dob', '-')
-    patient_gender = input_params.get('patient_gender', '-')
-    drug_allergies = input_params.get('drug_allergies', '-')
-    
-    # Column 3: Lab/Specimen Information (right aligned in reference)
-    lab_accession = input_params.get('lab_accession', '-')
-    date_collected = input_params.get('date_collected', '-')
-    date_received = input_params.get('date_received', '-')
-    date_reported = input_params.get('date_reported', '-')
-    specimen_type = input_params.get('specimen_type', '-')
-    specimen_site = input_params.get('specimen_site', '-')
-    
-    # Create paragraph style for table cells
-    label_style = ParagraphStyle(
-        'LabelStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=9,
-        leading=10,
-        spaceBefore=0,
-        spaceAfter=0,
-        leftIndent=0,
-        rightIndent=0,
-        alignment=TA_LEFT
-    )
-    
-    value_style = ParagraphStyle(
-        'ValueStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        leading=10,
-        spaceBefore=0,
-        spaceAfter=0,
-        leftIndent=0,
-        rightIndent=0,
-        alignment=TA_LEFT
-    )
-    
-    # Create the table structure exactly as in reference
-    table_data = []
-    
-    # Row 1
-    table_data.append([
-        Paragraph('<b>Facility Name:</b>', label_style),
-        Paragraph(_format_text_field(facility_name), value_style),
-        Paragraph('<b>Patient Name:</b>', label_style),
-        Paragraph(_format_text_field(patient_name), value_style),
-        Paragraph('<b>Lab Accession #:</b>', label_style),
-        Paragraph(_format_text_field(lab_accession), value_style)
-    ])
-    
-    # Row 2
-    table_data.append([
-        Paragraph('<b>Provider:</b>', label_style),
-        Paragraph(_format_text_field(provider), value_style),
-        Paragraph('<b>Patient DOB:</b>', label_style),
-        Paragraph(_format_text_field(patient_dob), value_style),
-        Paragraph('<b>Date Collected:</b>', label_style),
-        Paragraph(_format_text_field(date_collected), value_style)
-    ])
-    
-    # Row 3
-    table_data.append([
-        Paragraph('<b>Phone:</b>', label_style),
-        Paragraph(_format_text_field(phone), value_style),
-        Paragraph('<b>Patient Gender:</b>', label_style),
-        Paragraph(_format_text_field(patient_gender), value_style),
-        Paragraph('<b>Date Received:</b>', label_style),
-        Paragraph(_format_text_field(date_received), value_style)
-    ])
-    
-    # Row 4 - Drug Allergies row
-    drug_allergies_style = ParagraphStyle(
-        'DrugAllergiesStyle',
-        parent=value_style,
-        textColor=black  # No special red color since default is now '-'
-    )
-    
-    table_data.append([
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('<b>Drug Allergies:</b>', label_style),
-        Paragraph(_format_text_field(drug_allergies), drug_allergies_style),
-        Paragraph('<b>Date Reported:</b>', label_style),
-        Paragraph(_format_text_field(date_reported), value_style)
-    ])
-    
-    # Row 5
-    table_data.append([
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('<b>Specimen Type:</b>', label_style),
-        Paragraph(_format_text_field(specimen_type), value_style)
-    ])
-    
-    # Row 6
-    table_data.append([
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('<b>Specimen Site:</b>', label_style),
-        Paragraph(_format_text_field(specimen_site), value_style)
-    ])
-    
-    # Get medical input parameters
-    from utils import get_pathogens_from_input, format_pathogens, get_resistance_genes_from_input, format_resistance_genes
+            icd_code_names = 'N/A'
     
     pathogens = get_pathogens_from_input(input_params)
-    pathogen_display = format_pathogens(pathogens) if pathogens else '-'
-    
-    # Get resistance genes
+    pathogen_display = format_pathogens(pathogens) if pathogens else 'N/A'
     resistant_genes = get_resistance_genes_from_input(input_params)
-    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else '-'
+    resistant_gene = format_resistance_genes(resistant_genes) if resistant_genes else 'N/A'
     
-    age = input_params.get('age', '-')
-    if age and age != '-':
-        age = str(age)
+    # Get panel type from input parameters (for header display)
+    panel = input_params.get('panel', 'N/A')
+    if panel and panel != 'N/A':
+        panel = panel.upper()
+    else:
+        panel = "N/A"
     
-    # Get ICD code names from icd_transformation if available
-    from utils import get_icd_names_from_state
-    icd_code_names = get_icd_names_from_state(data) if isinstance(data, dict) else '-'
-    if not icd_code_names or icd_code_names == 'not specified':
-        # Fallback to severity_codes if transformation not available
-        severity_codes = input_params.get('severity_codes', '-')
-        icd_code_names = severity_codes if severity_codes else '-'
+    # Get gene analysis
+    gene_analysis_list = result.get('pharmacist_analysis_on_resistant_gene', [])
     
-    # Get sample and gender for display
-    sample_display = input_params.get('sample', '-')
-    if not sample_display or sample_display.upper() == 'N/A':
-        sample_display = '-'
+    # Build medication HTML
+    medications_html = _build_medications_html(therapy_plan)
     
-    gender = input_params.get('gender', '-')
-    if not gender or gender.upper() == 'N/A':
-        gender = '-'
+    # Build gene analysis HTML
+    gene_html = _build_gene_html(gene_analysis_list)
     
-    # Row 7 - Medical Input Parameters
-    table_data.append([
-        Paragraph('<b>Pathogen:</b>', label_style),
-        Paragraph(_format_text_field(pathogen_display), value_style),
-        Paragraph('<b>Resistant Gene:</b>', label_style),
-        Paragraph(_format_text_field(resistant_gene), value_style),
-        Paragraph('<b>Sample:</b>', label_style),
-        Paragraph(_format_text_field(sample_display), value_style)
-    ])
+    # FIXED: Create proper header section like in the image
+    header_html = f"""
+    <!-- Header Section -->
+    <div class="header-section">
+        <div class="header-main">
+            <div class="header-title">#{panel if panel != 'N/A' else 'N/A'}</div>
+        </div>
+    </div>
     
-    # Row 8 - More Medical Input Parameters (Gender under Sample)
-    table_data.append([
-        Paragraph('<b>Age:</b>', label_style),
-        Paragraph(_format_text_field(age), value_style),
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('<b>Gender:</b>', label_style),
-        Paragraph(_format_text_field(gender), value_style)
-    ])
+    <!-- Patient Info Section -->
+    <div class="patient-info-section">
+        <table class="patient-info-table">
+            <tr>
+                <td class="info-label">Patient Name:</td>
+                <td class="info-value">{_format_text_field(input_params.get('patient_name', 'N/A'))}</td>
+                <td class="info-label">Lab Accession:</td>
+                <td class="info-value">{_format_text_field(input_params.get('lab_accession', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Provider:</td>
+                <td class="info-value">{_format_text_field(input_params.get('provider', 'N/A'))}</td>
+                <td class="info-label">Date Collected:</td>
+                <td class="info-value">{_format_text_field(input_params.get('date_collected', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Phone:</td>
+                <td class="info-value">{_format_text_field(input_params.get('phone', 'N/A'))}</td>
+                <td class="info-label">Date Received:</td>
+                <td class="info-value">{_format_text_field(input_params.get('date_received', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Patient DOB:</td>
+                <td class="info-value">{_format_text_field(input_params.get('patient_dob', 'N/A'))}</td>
+                <td class="info-label">Date Reported:</td>
+                <td class="info-value">{_format_text_field(input_params.get('date_reported', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Patient Gender:</td>
+                <td class="info-value">{_format_text_field(input_params.get('patient_gender', input_params.get('gender', 'N/A')))}</td>
+                <td class="info-label">Specimen Type:</td>
+                <td class="info-value">{_format_text_field('N/A')}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Drug Allergies:</td>
+                <td class="info-value">{_format_text_field(', '.join(input_params.get('drug_allergies', input_params.get('allergy', []))) if input_params.get('drug_allergies') or input_params.get('allergy') else 'N/A')}</td>
+                <td class="info-label">Specimen Site:</td>
+                <td class="info-value">{_format_text_field(input_params.get('specimen_site', 'N/A'))}</td>
+            </tr>
+            <tr>
+                <td class="info-label">Age:</td>
+                <td class="info-value">{_format_text_field(input_params.get('age', 'N/A'))}</td>
+                <td class="info-label">Systemic:</td>
+                <td class="info-value">{_format_text_field('Yes' if input_params.get('systemic') is True else ('No' if input_params.get('systemic') is False else 'N/A'))}</td>
+            </tr>
+        </table>
+    </div>
     
-    # Row 9 - ICD Codes
-    table_data.append([
-        Paragraph('', label_style),
-        Paragraph('', value_style),
-        Paragraph('<b>ICD Codes:</b>', label_style),
-        Paragraph(_format_text_field(icd_code_names), value_style),
-        Paragraph('', label_style),
-        Paragraph('', value_style)
-    ])
+    <!-- Test Results Section -->
+    <div class="test-results-section">
+        <div class="section-header">TEST RESULTS</div>
+        <table class="test-results-table">
+            <tr>
+                <td class="result-label">Pathogen:</td>
+                <td class="result-value">{_format_text_field(pathogen_display)}</td>
+            </tr>
+            <tr>
+                <td class="result-label">Resistant Gene:</td>
+                <td class="result-value">{_format_text_field(resistant_gene)}</td>
+            </tr>
+            <tr>
+                <td class="result-label">Severity Codes:</td>
+                <td class="result-value">{_format_text_field(icd_code_names if icd_code_names and icd_code_names != 'not specified' else 'N/A')}</td>
+            </tr>
+        </table>
+    </div>
+    """
     
-    # Calculate column widths
-    total_width = 7.5 * inch
-    section_width = total_width / 3
-    label_width = section_width * 0.48
-    value_width = section_width * 0.52
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        {_get_css_styles()}
+    </style>
+</head>
+<body>
+    {header_html}
     
-    col_widths = [label_width, value_width, label_width, value_width, label_width, value_width]
+    <!-- Medication Section -->
+    {medications_html if medications_html else ''}
     
-    # Create table with minimal cell padding
-    table = Table(table_data, colWidths=col_widths, hAlign='LEFT')
+    <!-- Gene Section -->
+    {gene_html if gene_html else ''}
     
-    # Style the table to match reference exactly
-    table_style = TableStyle([
-        ('BOX', (0, 0), (-1, -1), 0, white),
-        ('INNERGRID', (0, 0), (-1, -1), 0, white),
-        
-        ('BACKGROUND', (0, 0), (0, -1), white),
-        ('BACKGROUND', (2, 0), (2, -1), white),
-        ('BACKGROUND', (4, 0), (4, -1), white),
-        
-        ('BACKGROUND', (1, 0), (1, -1), white),
-        ('BACKGROUND', (3, 0), (3, -1), white),
-        ('BACKGROUND', (5, 0), (5, -1), white),
-        
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-    ])
+    <!-- Negative Sections -->
+    {_build_negative_sections_html(data)}
     
-    table.setStyle(table_style)
-    
-    # Add table to elements
-    elements.append(table)
-    elements.append(Spacer(1, 0.1 * inch))
-    
-    return elements
+    <!-- Footer -->
+    <div class="footer">
+        <p>The estimated microbial load is the approximate copies of target nucleic acid, present in the original sample (copies per mL), categorized as follows: HIGH (>1 million copies/mL). MODERATE (500,000-1 million copies per mL), and LOW (100,000-500,000 copies per mL). Levels less than LOW are generally not reported, unless deemed potentially significant. Loads less than LOW generally represent normal flora/contaminants.</p>
+        <p>CLIA# 45D2257672 Processing and Detection Methodology: DNA/RNA extraction from the sample was performed. Reverse transcriptase polymerase chain reaction (TaqMan qPCR) was utilized for detection.</p>
+    </div>
+</body>
+</html>
+"""
+    return html_content
 
 
-def _create_negative_sections(data: Dict[str, Any], styles) -> list:
-    """
-    Create the negative organisms and negative resistance genes sections.
-    Uses static lists that always appear in the PDF, regardless of input.
-    """
-    elements = []
+def _build_medications_html(therapy_plan: Dict[str, Any]) -> str:
+    """Build HTML for medication recommendations."""
+    first_choice = therapy_plan.get('first_choice', [])
+    second_choice = therapy_plan.get('second_choice', [])
+    alternative = therapy_plan.get('alternative_antibiotic', [])
     
-    # Static list of negative organisms (always displayed)
-    static_negative_organisms = [
-        'Acinetobacter baumannii',
-        'Bacteroides fragilis',
-        'Candida glabrata',
-        'Candida albicans',
-        'Candida auris',
-        'Candida krusei',
-        'Candida lusitaniae',
-        'Candida parapsilosis',
-        'Candida tropicalis',
-        'Citrobacter freundii',
-        'Clostridium novyi',
-        'Clostridium perfringens',
-        'Clostridium septicum',
-        'Enterobacter cloacae',
-        'Enterococcus faecium',
-        'Escherichia coli',
-        'Group A strep',
-        'Group B strep',
-        'Group C and G Strep',
-        'Herpes Zoster',
-        'HSV-1 (Herpes Simplex)',
-        'HSV-2 (Herpes Simplex)',
-        'kingella kingae',
-        'Klebsiella aerogenes',
-        'Klebsiella oxytoca',
-        'Klebsiella pneumoniae',
-        'Morganella morganii',
-        'Not an organism',
-        'Proteus mirabilis',
-        'Proteus vulgaris',
-        'Pseudomonas aeruginosa',
-        'Trichophyton spp.'
+    if not (first_choice or second_choice or alternative):
+        return ""
+    
+    html_parts = []
+    
+    # Check if we have any medications
+    if first_choice or second_choice or alternative:
+        html_parts.append('<div class="medication-section">')
+        html_parts.append('<div class="section-header">MEDICATION RECOMMENDATIONS</div>')
+        
+        from utils import fix_text_encoding
+        
+        # Process first_choice medications
+        if first_choice:
+            for idx, med in enumerate(first_choice):
+                name = fix_text_encoding(med.get('medical_name', ''))
+                route = fix_text_encoding(med.get('route_of_administration', ''))
+                dose = fix_text_encoding(med.get('dose_duration', ''))
+                coverage = fix_text_encoding(med.get('coverage_for', ''))
+                renal = fix_text_encoding(med.get('renal_adjustment', ''))
+                considerations = fix_text_encoding(med.get('general_considerations', ''))
+                
+                html_parts.append('<div class="medication-card">')
+                # Show "First Line" tag only on first medication of this category
+                if idx == 0:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section first-line-tag">First Line</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                
+                html_parts.append('<div class="medication-details">')
+                html_parts.append('<table class="medication-table">')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Route:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(route)}</td>')
+                html_parts.append('</tr>')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Dose:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(dose)}</td>')
+                html_parts.append('</tr>')
+                if coverage:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Coverage For:</td>')
+                    html_parts.append(f'<td class="detail-value coverage">{_format_text_field(coverage)}</td>')
+                    html_parts.append('</tr>')
+                if renal:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Renal Adjustment:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(renal)}</td>')
+                    html_parts.append('</tr>')
+                if considerations:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Considerations:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
+                    html_parts.append('</tr>')
+                html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+        
+        # Process second_choice medications
+        if second_choice:
+            for idx, med in enumerate(second_choice):
+                name = fix_text_encoding(med.get('medical_name', ''))
+                route = fix_text_encoding(med.get('route_of_administration', ''))
+                dose = fix_text_encoding(med.get('dose_duration', ''))
+                coverage = fix_text_encoding(med.get('coverage_for', ''))
+                renal = fix_text_encoding(med.get('renal_adjustment', ''))
+                considerations = fix_text_encoding(med.get('general_considerations', ''))
+                
+                html_parts.append('<div class="medication-card">')
+                # Show "Second Line" tag only on first medication of this category
+                if idx == 0:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section second-line-tag">Second Line</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                
+                html_parts.append('<div class="medication-details">')
+                html_parts.append('<table class="medication-table">')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Route:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(route)}</td>')
+                html_parts.append('</tr>')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Dose:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(dose)}</td>')
+                html_parts.append('</tr>')
+                if coverage:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Coverage For:</td>')
+                    html_parts.append(f'<td class="detail-value coverage">{_format_text_field(coverage)}</td>')
+                    html_parts.append('</tr>')
+                if renal:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Renal Adjustment:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(renal)}</td>')
+                    html_parts.append('</tr>')
+                if considerations:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Considerations:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
+                    html_parts.append('</tr>')
+                html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+        
+        # Process alternative_antibiotic medications
+        if alternative:
+            for idx, med in enumerate(alternative):
+                name = fix_text_encoding(med.get('medical_name', ''))
+                route = fix_text_encoding(med.get('route_of_administration', ''))
+                dose = fix_text_encoding(med.get('dose_duration', ''))
+                coverage = fix_text_encoding(med.get('coverage_for', ''))
+                renal = fix_text_encoding(med.get('renal_adjustment', ''))
+                considerations = fix_text_encoding(med.get('general_considerations', ''))
+                
+                html_parts.append('<div class="medication-card">')
+                # Show "Alternate" tag only on first medication of this category
+                if idx == 0:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append('<td class="medication-tag-section alternate-tag">Alternate</td>')
+                    html_parts.append(f'<td class="medication-name-section"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                else:
+                    html_parts.append('<table class="medication-header"><tr>')
+                    html_parts.append(f'<td class="medication-name-section full-width"><span class="medication-name">{_format_text_field(name)}</span></td>')
+                    html_parts.append('</tr></table>')
+                
+                html_parts.append('<div class="medication-details">')
+                html_parts.append('<table class="medication-table">')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Route:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(route)}</td>')
+                html_parts.append('</tr>')
+                html_parts.append('<tr>')
+                html_parts.append(f'<td class="detail-label">Dose:</td>')
+                html_parts.append(f'<td class="detail-value">{_format_text_field(dose)}</td>')
+                html_parts.append('</tr>')
+                if coverage:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Coverage For:</td>')
+                    html_parts.append(f'<td class="detail-value coverage">{_format_text_field(coverage)}</td>')
+                    html_parts.append('</tr>')
+                if renal:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Renal Adjustment:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(renal)}</td>')
+                    html_parts.append('</tr>')
+                if considerations:
+                    html_parts.append('<tr>')
+                    html_parts.append(f'<td class="detail-label">Considerations:</td>')
+                    html_parts.append(f'<td class="detail-value">{_format_text_field(considerations)}</td>')
+                    html_parts.append('</tr>')
+                html_parts.append('</table>')
+                
+                # Add references for this antibiotic
+                sources = med.get('mentioned_in_sources', [])
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    html_parts.append('<div class="medication-references">')
+                    html_parts.append('<div class="references-label">References:</div>')
+                    for ref in sources:
+                        if ref:
+                            ref_escaped = html.escape(ref)
+                            html_parts.append(f'<div class="reference-line"><a href="{ref_escaped}" class="reference-link">{ref_escaped}</a></div>')
+                    html_parts.append('</div>')
+                
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+        
+        html_parts.append('</div>')
+    
+    return '\n'.join(html_parts)
+
+
+def _build_gene_html(gene_analysis_list: list) -> str:
+    """Build HTML for resistance gene information."""
+    if not gene_analysis_list:
+        return ""
+    
+    html_parts = ['<div class="gene-section">']
+    html_parts.append('<div class="section-header">RESISTANCE GENE INFORMATION</div>')
+    
+    from utils import fix_text_encoding
+    for gene_analysis in gene_analysis_list:
+        gene_name = fix_text_encoding(gene_analysis.get('detected_resistant_gene_name', ''))
+        medication_classes = fix_text_encoding(gene_analysis.get('potential_medication_class_affected', ''))
+        considerations = fix_text_encoding(gene_analysis.get('general_considerations', ''))
+        
+        html_parts.append('<div class="gene-info-card">')
+        html_parts.append('<table class="gene-info-table">')
+        html_parts.append('<tr>')
+        html_parts.append('<td class="gene-label"><strong>Detected Resistance Gene:</strong></td>')
+        html_parts.append(f'<td class="gene-value">{_format_text_field(gene_name)}</td>')
+        html_parts.append('</tr>')
+        html_parts.append('<tr>')
+        html_parts.append('<td class="gene-label"><strong>Potential Medication Classes Affected:</strong></td>')
+        html_parts.append(f'<td class="gene-value">{_format_text_field(medication_classes)}</td>')
+        html_parts.append('</tr>')
+        if considerations:
+            html_parts.append('<tr>')
+            html_parts.append('<td class="gene-label"><strong>General Considerations:</strong></td>')
+            html_parts.append(f'<td class="gene-value">{_format_text_field(considerations)}</td>')
+            html_parts.append('</tr>')
+        html_parts.append('</table>')
+        html_parts.append('</div>')
+    
+    html_parts.append('</div>')
+    return '\n'.join(html_parts)
+
+
+def _build_negative_sections_html(data: Dict[str, Any] = None) -> str:
+    """Build HTML for negative organisms and genes sections using static lists."""
+    negative_organisms = [
+        'Acinetobacter baumannii', 'Bacteroides fragilis', 'Candida glabrata', 'Candida albicans',
+        'Candida auris', 'Candida krusei', 'Candida lusitaniae', 'Candida parapsilosis',
+        'Candida tropicalis', 'Citrobacter freundii', 'Clostridium novyi', 'Clostridium perfringens',
+        'Clostridium septicum', 'Enterobacter cloacae', 'Enterococcus faecium', 'Escherichia coli',
+        'Group A strep', 'Group B strep', 'Group C and G Strep', 'Herpes Zoster',
+        'HSV-1 (Herpes Simplex)', 'HSV-2 (Herpes Simplex)', 'kingella kingae', 'Klebsiella aerogenes',
+        'Klebsiella oxytoca', 'Klebsiella pneumoniae', 'Morganella morganii', 'Not an organism',
+        'Proteus mirabilis', 'Proteus vulgaris', 'Pseudomonas aeruginosa', 'Trichophyton spp.'
     ]
     
-    # Static list of negative resistance genes (always displayed)
-    static_negative_resistance_genes = [
-        'ampC',
-        'Ant-2',
-        'Aph 2',
-        'aph3',
-        'CTX-M1',
-        'CTX-M2',
-        'dfrA1',
-        'dfrA5',
-        'Erm B',
-        'ErmA',
-        'femA',
-        'Gyrase A',
-        'KPC',
-        'mefA',
-        'NDM',
-        'OXA-48',
-        'Par C',
-        'QnrA',
-        'QnrB',
-        'SHV',
-        'Sul 2',
-        'Sul1',
-        'TEM',
-        'Tet O',
-        'tetB',
-        'vanA1',
-        'vanA2',
-        'VanB'
+    negative_genes = [
+        'ampC', 'Ant-2', 'Aph 2', 'aph3', 'CTX-M1', 'CTX-M2', 'dfrA1', 'dfrA5',
+        'Erm B', 'ErmA', 'femA', 'Gyrase A', 'KPC', 'mefA', 'NDM', 'OXA-48',
+        'Par C', 'QnrA', 'QnrB', 'SHV', 'Sul 2', 'Sul1', 'TEM', 'Tet O',
+        'tetB', 'vanA1', 'vanA2', 'VanB'
     ]
     
-    # Create styles for negative sections
-    negative_header_style = ParagraphStyle(
-        'NegativeHeader',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=11,
-        textColor=white,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
+    html_parts = ['<div class="negative-sections">']
     
-    negative_content_style = ParagraphStyle(
-        'NegativeContent',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        alignment=TA_LEFT,
-        spaceBefore=0,
-        spaceAfter=0
-    )
+    # Negative organisms
+    html_parts.append('<div class="negative-section">')
+    html_parts.append('<div class="section-header">NEGATIVE ORGANISMS TESTED</div>')
+    html_parts.append('<div class="negative-content">')
+    for i, org in enumerate(negative_organisms):
+        if i > 0:
+            html_parts.append(', ')
+        html_parts.append(_format_text_field(org))
+    html_parts.append('</div>')
+    html_parts.append('</div>')
     
-    # Section 1: NEGATIVE ORGANISMS TESTED (always displayed)
-    elements.append(Spacer(1, 0.15 * inch))
+    # Negative genes
+    html_parts.append('<div class="negative-section">')
+    html_parts.append('<div class="section-header">NEGATIVE RESISTANCE GENES TESTED</div>')
+    html_parts.append('<div class="negative-content">')
+    for i, gene in enumerate(negative_genes):
+        if i > 0:
+            html_parts.append(', ')
+        html_parts.append(_format_text_field(gene))
+    html_parts.append('</div>')
+    html_parts.append('</div>')
     
-    # Header
-    org_header_text = Paragraph("NEGATIVE ORGANISMS TESTED", negative_header_style)
-    org_header_table = Table([[org_header_text]], colWidths=[7.5 * inch])
-    org_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    elements.append(org_header_table)
-    
-    # Content
-    org_content_text = ', '.join(static_negative_organisms)
-    org_content = Paragraph(org_content_text, negative_content_style)
-    org_content_table = Table([[org_content]], colWidths=[7.5 * inch])
-    org_content_table.setStyle(TableStyle([
-        ('BOX', (0, 0), (-1, -1), 0.5, black),
-        ('BACKGROUND', (0, 0), (-1, -1), white),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(org_content_table)
-    
-    # Section 2: NEGATIVE RESISTANCE GENES TESTED (always displayed)
-    elements.append(Spacer(1, 0.15 * inch))
-    
-    # Header
-    gene_header_text = Paragraph("NEGATIVE RESISTANCE GENES TESTED", negative_header_style)
-    gene_header_table = Table([[gene_header_text]], colWidths=[7.5 * inch])
-    gene_header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#4472C4')),  # Blue header
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    elements.append(gene_header_table)
-    
-    # Content
-    gene_content_text = ', '.join(static_negative_resistance_genes)
-    gene_content = Paragraph(gene_content_text, negative_content_style)
-    gene_content_table = Table([[gene_content]], colWidths=[7.5 * inch])
-    gene_content_table.setStyle(TableStyle([
-        ('BOX', (0, 0), (-1, -1), 0.5, black),
-        ('BACKGROUND', (0, 0), (-1, -1), white),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(gene_content_table)
-    
-    return elements
+    html_parts.append('</div>')
+    return '\n'.join(html_parts)
 
 
-# Global variable to track total pages and current page
-_total_pages = [0]
-_current_page = [0]
-
-def _draw_footer(canv):
-    """Draw footer at the bottom of the page."""
-    footer_text = (
-        "The estimated microbial load is the approximate copies of target nucleic acid, present in the original sample (copies per mL), categorized as follows: HIGH (>1 million copies/mL). MODERATE (500,000-1 million copies per mL), and LOW (100,000-500,000 copies per mL). Levels less than LOW are generally not reported, unless deemed potentially significant. Loads less than LOW generally represent normal flora/contaminants. "
-        "CLIA# 45D2257672 Processing and Detection Methodology: DNA/RNA extraction from the sample was performed. Reverse transcriptase polymerase chain reaction (TaqMan qPCR) was utilized for detection."
-    )
-    
-    # Save canvas state
-    canv.saveState()
-    
-    # Set footer style
-    canv.setFont('Helvetica', 8)
-    canv.setFillColor(black)
-    
-    # Get page dimensions
-    page_width = letter[0]
-    left_margin = 0.5 * inch
-    right_margin = 0.5 * inch
-    footer_width = page_width - left_margin - right_margin
-    
-    # Calculate footer position from bottom of page
-    footer_y = 0.6 * inch
-    
-    # Draw footer text (wrapped to fit page width)
-    from reportlab.lib.utils import simpleSplit
-    lines = simpleSplit(footer_text, 'Helvetica', 8, footer_width)
-    
-    # Calculate line height
-    line_height = 11  # Line spacing
-    
-    # Draw each line from top to bottom (first line at top)
-    # Start from the topmost position and work down
-    y_position = footer_y + (len(lines) - 1) * line_height
-    for line in lines:
-        canv.drawString(left_margin, y_position, line)
-        y_position -= line_height  # Move down for next line
-    
-    # Restore canvas state
-    canv.restoreState()
-
-def _count_pages_first_pass(canv, doc):
-    """First pass: just count pages."""
-    page_num = canv.getPageNumber()
-    _total_pages[0] = max(_total_pages[0], page_num)
-
-def _first_page_footer(canv, doc):
-    """Footer callback for first page - track page number."""
-    _current_page[0] = canv.getPageNumber()
-    _total_pages[0] = max(_total_pages[0], _current_page[0])
-
-def _later_pages_footer(canv, doc):
-    """Footer callback for later pages - draw footer on page 3 only."""
-    _current_page[0] = canv.getPageNumber()
-    _total_pages[0] = max(_total_pages[0], _current_page[0])
-    
-    # Draw footer only on page 3
-    if _current_page[0] == 3:
-        _draw_footer(canv)
-
-
-def export_to_pdf(data: Dict[str, Any], output_path: Optional[str] = None) -> str:
+def _get_css_styles() -> str:
+    """Get CSS styles for the PDF."""
+    return """
+        @page {
+            size: letter;
+            margin: 0.4in 0.4in 0.4in 0.4in;
+        }
+        
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            font-size: 9pt;
+            color: #000;
+            line-height: 1.2;
+            margin: 0;
+            padding: 0;
+        }
+        
+        /* Header Section */
+        .header-section {
+            margin-bottom: 12px;
+        }
+        
+        .header-main {
+            background-color: #4472C4;
+            padding: 8px 0;
+            text-align: center;
+            margin-bottom: 8px;
+        }
+        
+        .header-title {
+            color: white;
+            font-size: 16pt;
+            font-weight: bold;
+        }
+        
+        /* Patient Info Section */
+        .patient-info-section {
+            margin-bottom: 12px;
+        }
+        
+        .patient-info-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 9pt;
+        }
+        
+        .patient-info-table tr {
+            border-bottom: 0.5pt solid #ddd;
+        }
+        
+        .patient-info-table td {
+            padding: 3px 4px;
+            vertical-align: top;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            width: 1.2in;
+            color: #333;
+        }
+        
+        .info-value {
+            width: 2.2in;
+            color: #000;
+        }
+        
+        /* Test Results Section */
+        .test-results-section {
+            margin-bottom: 15px;
+        }
+        
+        .test-results-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 9pt;
+        }
+        
+        .test-results-table tr {
+            border-bottom: 0.5pt solid #ddd;
+        }
+        
+        .test-results-table td {
+            padding: 4px 6px;
+            vertical-align: top;
+        }
+        
+        .result-label {
+            font-weight: bold;
+            width: 1.5in;
+            color: #333;
+        }
+        
+        .result-value {
+            color: #000;
+        }
+        
+        /* Section Headers */
+        .section-header {
+            background-color: #4472C4;
+            color: white;
+            text-align: center;
+            padding: 6px 0;
+            font-size: 11pt;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        
+        /* Medication Section */
+        .medication-section {
+            margin-bottom: 15px;
+        }
+        
+        .medication-card {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            overflow: hidden;
+            text-align: left;
+            min-height: 80px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        
+        .medication-header {
+            background-color: #ffffff;
+            border-bottom: 1px solid #ccc;
+            width: 100%;
+            box-sizing: border-box;
+            border-collapse: collapse;
+            margin: 0;
+            padding: 0;
+            border-spacing: 0;
+        }
+        
+        .medication-header td {
+            vertical-align: middle;
+            margin: 0;
+        }
+        
+        .medication-tag-section {
+            color: white;
+            width: 20%;
+            vertical-align: middle;
+            text-align: center;
+            font-size: 11pt;
+            font-weight: bold;
+            line-height: 1.3;
+            padding: 4px !important;
+            margin: 0;
+        }
+        
+        .medication-tag-section.first-line-tag {
+            background-color: #367FA9;
+        }
+        
+        .medication-tag-section.second-line-tag {
+            background-color: #5B9BD5;
+        }
+        
+        .medication-tag-section.alternate-tag {
+            background-color: #70AD47;
+        }
+        
+        .medication-name-section {
+            background-color: #ffffff;
+            width: 80%;
+            vertical-align: middle;
+            padding: 4px !important;
+            margin: 0;
+        }
+        
+        .medication-name-section.full-width {
+            width: 100%;
+        }
+        
+        .medication-name {
+            font-weight: bold;
+            font-size: 13pt;
+            color: #000;
+            text-align: left;
+            margin: 0;
+            padding: 0;
+            line-height: 1.4;
+        }
+        
+        .medication-details {
+            padding: 8px;
+        }
+        
+        .medication-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .medication-table tr {
+            border-bottom: 0.5pt solid #eee;
+        }
+        
+        .medication-table td {
+            padding: 3px 4px;
+            vertical-align: top;
+        }
+        
+        .detail-label {
+            font-weight: bold;
+            color: #666;
+            width: 1in;
+        }
+        
+        .detail-value {
+            color: #000;
+        }
+        
+        .detail-value.coverage {
+            color: #FF0000;
+            font-weight: bold;
+        }
+        
+        /* Medication References */
+        .medication-references {
+            margin-top: 2px;
+            padding-top: 2px;
+            border-top: 0.5pt solid #eee;
+        }
+        
+        .references-label {
+            font-weight: bold;
+            font-size: 8pt;
+            color: #666;
+            margin-bottom: 2px;
+            display: block;
+        }
+        
+        .reference-line {
+            margin: 0;
+            margin-bottom: 1px;
+            color: #333;
+            word-wrap: break-word;
+            font-size: 7pt;
+            line-height: 1.2;
+            padding: 0;
+            border: none;
+            background: none;
+        }
+        
+        .reference-link {
+            color: #0066cc;
+            text-decoration: none;
+        }
+        
+        /* Gene Section */
+        .gene-section {
+            margin-bottom: 15px;
+        }
+        
+        .gene-info-card {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 8px;
+            margin-bottom: 8px;
+            background-color: #f9f9f9;
+        }
+        
+        .gene-info-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .gene-info-table tr {
+            border-bottom: 0.5pt solid #ddd;
+        }
+        
+        .gene-info-table td {
+            padding: 4px 6px;
+            vertical-align: top;
+        }
+        
+        .gene-label {
+            font-weight: bold;
+            color: #333;
+            width: 2.5in;
+        }
+        
+        .gene-value {
+            color: #000;
+        }
+        
+        /* Negative Sections */
+        .negative-sections {
+            margin-bottom: 15px;
+        }
+        
+        .negative-section {
+            margin-bottom: 12px;
+        }
+        
+        .negative-content {
+            border: 0.5pt solid #000;
+            padding: 8px 10px;
+            font-size: 8.5pt;
+            line-height: 1.4;
+            background-color: #fff;
+        }
+        
+        /* Footer */
+        .footer {
+            font-size: 7.5pt;
+            line-height: 1.3;
+            margin-top: 20px;
+            padding-top: 10px;
+            border-top: 0.5pt solid #ccc;
+            color: #666;
+        }
+        
+        .footer p {
+            margin: 0 0 4px 0;
+        }
     """
-    Export data to PDF with exact design matching reference image.
+
+
+def export_to_pdf(data: Dict[str, Any], output_path: Optional[str] = None, save_to_disk: Optional[bool] = None) -> tuple[str, BytesIO]:
+    """
+    Export data to PDF using xhtml2pdf (pisa) - Pure Python, no system dependencies.
     
     Args:
         data: Dictionary containing input_parameters and result
-        output_path: Optional path for output file
+        output_path: Optional path for output file (only used if save_to_disk is True)
+        save_to_disk: Whether to save PDF to disk. If None, uses config setting.
         
     Returns:
-        Path to generated PDF file
+        Tuple of (pdf_path_or_name, pdf_bytes): 
+        - pdf_path_or_name: Path if saved to disk, or filename if not saved
+        - pdf_bytes: BytesIO object containing the PDF data
     """
-    if not REPORTLAB_AVAILABLE:
-        raise ImportError("ReportLab is not installed. Install with: pip install reportlab")
+    if not XHTML2PDF_AVAILABLE:
+        raise ImportError(
+            "xhtml2pdf (pisa) is not installed. Install with: pip install xhtml2pdf\n"
+            "This is a pure Python library with no system dependencies."
+        )
     
-    # Generate output path if not provided
-    if not output_path:
+    # Check if we should save to disk
+    if save_to_disk is None:
         from config import get_output_config
         output_config = get_output_config()
-        output_dir = Path(output_config.get('directory', 'output'))
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_path = str(output_dir / f"report_{timestamp}.pdf")
+        save_to_disk = output_config.get('save_enabled', True)
     
-    # Create PDF document with tight margins
-    doc = SimpleDocTemplate(
-        output_path,
-        pagesize=letter,
-        rightMargin=0.5*inch,
-        leftMargin=0.5*inch,
-        topMargin=0.4*inch,
-        bottomMargin=0.5*inch
+    # Generate HTML content
+    html_content = _create_html_template(data)
+    
+    # Create BytesIO buffer for PDF
+    pdf_buffer = BytesIO()
+    
+    # Convert HTML string to PDF
+    pisa_status = pisa.CreatePDF(
+        BytesIO(html_content.encode('utf-8')),
+        dest=pdf_buffer,
+        encoding='utf-8'
     )
     
-    # Get styles
-    styles = getSampleStyleSheet()
+    # Check for errors
+    if pisa_status.err:
+        raise Exception(f"Error generating PDF: {pisa_status.err}")
     
-    # Build story (list of flowables)
-    story = []
+    # Reset buffer position to beginning
+    pdf_buffer.seek(0)
     
-    # Add input section
-    input_elements = _create_input_section(data, styles)
-    story.extend(input_elements)
+    # Optionally save to disk
+    pdf_path_or_name = None
+    if save_to_disk:
+        # Generate output path if not provided
+        if not output_path:
+            from config import get_output_config
+            output_config = get_output_config()
+            output_dir = Path(output_config.get('directory', 'output'))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_path = str(output_dir / f"report_{timestamp}.pdf")
+        
+        # Save to disk
+        try:
+            with open(output_path, "wb") as f:
+                # Copy buffer content to file
+                pdf_buffer.seek(0)
+                f.write(pdf_buffer.read())
+                pdf_buffer.seek(0)  # Reset for return
+            logger.info(f"PDF report saved to: {output_path}")
+            pdf_path_or_name = output_path
+        except Exception as e:
+            logger.warning(f"Failed to save PDF to disk: {e}, but PDF is available for download")
+            # Generate a filename for reference even if save failed
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            pdf_path_or_name = f"report_{timestamp}.pdf"
+    else:
+        # Just generate a filename for reference
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        pdf_path_or_name = f"report_{timestamp}.pdf"
+        logger.info(f"PDF generated in memory (not saved to disk): {pdf_path_or_name}")
     
-    # Add medication section
-    medication_elements = _create_medication_section(data, styles)
-    story.extend(medication_elements)
-    
-    # Add gene section
-    gene_elements = _create_gene_section(data, styles)
-    story.extend(gene_elements)
-    
-    # Add negative sections
-    negative_elements = _create_negative_sections(data, styles)
-    story.extend(negative_elements)
-    
-    # Reset footer tracking for new PDF
-    global _total_pages, _current_page
-    _total_pages[0] = 0
-    _current_page[0] = 0
-    
-    # Build PDF with footer callbacks
-    # The footer will be drawn on the last page only
-    # We track the maximum page number, and draw footer when current page equals max
-    doc.build(story, onFirstPage=_first_page_footer, onLaterPages=_later_pages_footer)
-    
-    logger.info(f"PDF report exported to: {output_path}")
-    return output_path
+    return pdf_path_or_name, pdf_buffer
