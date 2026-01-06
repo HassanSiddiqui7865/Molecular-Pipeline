@@ -15,31 +15,32 @@ _env_loaded = False
 _env_file_used = None
 
 def _ensure_env_loaded():
-    """Ensure .env file is loaded. Supports .env.dev for development and .env for production."""
+    """Ensure .env file is loaded. Uses single .env file for all environments."""
     global _env_loaded, _env_file_used
     if not _env_loaded:
         # Look for .env file in project root (parent of src)
         project_root = Path(__file__).parent.parent
+        env_path = project_root / '.env'
         
-        # Check for environment mode from ENV environment variable
-        # If ENV=dev, use .env.dev; otherwise use .env
-        env_mode = os.getenv('ENV', '').lower()
-        
-        if env_mode == 'dev':
-            env_path = project_root / '.env.dev'
-            if not env_path.exists():
-                # Fallback to .env if .env.dev doesn't exist
-                env_path = project_root / '.env'
-                logger.warning(f".env.dev not found, falling back to .env")
-        else:
-            env_path = project_root / '.env'
-        
+        # Load .env file FIRST, then check ENV variable
         if env_path.exists():
             load_dotenv(env_path)
             _env_file_used = env_path
-            logger.info(f"Loaded environment variables from {env_path} (mode: {env_mode or 'production'})")
         else:
             logger.warning(f".env file not found at {env_path}, using system environment variables")
+        
+        # Check for environment mode from ENV environment variable (after loading .env)
+        env_mode = os.getenv('ENV', '').lower()
+        
+        # Determine if development mode (supports both 'dev' and 'development')
+        is_development = env_mode in ['dev', 'development']
+        mode_display = 'development' if is_development else 'production'
+        
+        if _env_file_used:
+            logger.info(f"Loaded environment variables from {_env_file_used} (mode: {mode_display})")
+        elif env_mode:
+            logger.info(f"Running in {mode_display} mode (from ENV variable)")
+        
         _env_loaded = True
 
 
@@ -69,7 +70,7 @@ def get_output_config() -> Dict[str, Any]:
     _ensure_env_loaded()
     # Check environment mode - disable saving in production
     env_mode = os.getenv('ENV', '').lower()
-    is_production = env_mode != 'dev'
+    is_production = env_mode not in ['dev', 'development']
     
     # Check if saving is explicitly disabled via env var, or if in production mode
     save_enabled_env = os.getenv('SAVE_OUTPUT_TO_DISK', '').lower()
@@ -77,7 +78,7 @@ def get_output_config() -> Dict[str, Any]:
         # Explicitly set via env var
         save_enabled = save_enabled_env == 'true'
     else:
-        # Default: enabled in dev, disabled in production
+        # Default: enabled in dev/development, disabled in production
         save_enabled = not is_production
     
     return {

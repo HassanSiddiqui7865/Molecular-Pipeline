@@ -1,81 +1,6 @@
-================================================================================
-TEST CASE 2: Single pathogen - MRSA bacteremia
-Copy this JSON to replace content in input.json:
-================================================================================
-
-{
-  "pathogens": [
-    {
-      "pathogen_name": "Staphylococcus aureus",
-      "pathogen_count": "10^5 CFU/ML"
-    }
-  ],
-  "resistant_genes": [
-    "mecA"
-  ],
-  "severity_codes": [
-    "A41.2"
-  ],
-  "age": 45,
-  "sample": "Blood",
-  "systemic": true
-}
-
-================================================================================
-TEST CASE 3: Gram-negative - ESBL E. coli UTI
-Copy this JSON to replace content in input.json:
-================================================================================
-
-{
-  "pathogens": [
-    {
-      "pathogen_name": "Escherichia coli",
-      "pathogen_count": "10^5 CFU/ML"
-    }
-  ],
-  "resistant_genes": [
-    "CTX-M-15",
-    "SHV-12"
-  ],
-  "severity_codes": [
-    "N39.0"
-  ],
-  "age": 28,
-  "panel": "Urine",
-  "systemic": false
-}
 
 
-
-{
-  "pathogens": [
-    {
-      "pathogen_name": "Staphylococcus aureus",
-      "pathogen_count": "10^3 CFU/ML"
-    },
-    {
-      "pathogen_name": "Enterococcus faecalis",
-      "pathogen_count": "10^4 CFU/ML"
-    }
-  ],
-  "resistant_genes": [
-    "mecA",
-    "tetM",
-    "dfrA",
-    "Ant-la"
-  ],
-  "severity_codes": [
-    "A41.2",
-    "A41.81"
-  ],
-  "age": 32,
-  "sample": "Blood",
-  "systemic": true
-}
-
-
-
-
+Women Health
 {
   "pathogens": [
     {
@@ -112,6 +37,7 @@ Copy this JSON to replace content in input.json:
   ]
 }
 
+Nail
 {
   "pathogens": [
     {
@@ -133,6 +59,37 @@ Copy this JSON to replace content in input.json:
   ],
   "age": 43,
   "systemic": null,
+  "gender": "Male",
+  "allergy": []
+}
+
+RPP
+{
+  "pathogens": [
+    {
+      "pathogen_name": "Bordetella holmesii",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Bordetella parapertussis",
+      "pathogen_count": "1x10^5"
+    },
+    {
+      "pathogen_name": "Bordetella pertussis",
+      "pathogen_count": "1x10^4"
+    },
+    {
+      "pathogen_name": "Chlamydia pneumoniae",
+      "pathogen_count": "1x10^3"
+    }
+  ],
+  "resistant_genes": [],
+  "severity_codes": [
+    "A37.90",
+    "A37.10"
+  ],
+  "age": 25,
+  "systemic": true,
   "gender": "Male",
   "allergy": []
 }

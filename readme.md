@@ -2,24 +2,26 @@
 
 ## Environment Configuration
 
-The application supports separate configuration files for development and production:
+The application uses a single `.env` file for all environment variables. Set the `ENV` variable in the `.env` file to control the mode:
 
-- **`.env`** - Production environment variables (default)
-- **`.env.dev`** - Development environment variables
+- **`ENV=development`** or **`ENV=dev`** - Development mode (enables file saving, debug logging)
+- **`ENV=production`** or **`ENV=prod`** or unset - Production mode (default)
 
 ### Running the Server
 
-**Development (uses `.env.dev`):**
+**Development mode:**
+Set `ENV=development` in your `.env` file, then:
 ```bash
-ENV=dev uvicorn app:app --host 0.0.0.0 --port 5000
+uvicorn app:app --host 0.0.0.0 --port 7653
 ```
 
-**Production (uses `.env`):**
+**Production mode:**
+Set `ENV=production` in your `.env` file (or leave it unset), then:
 ```bash
-uvicorn app:app --host 0.0.0.0 --port 5000
+uvicorn app:app --host 0.0.0.0 --port 7653
 ```
 
-The application will automatically load the appropriate `.env` file based on the `ENV` environment variable.
+The application will automatically detect the mode from the `ENV` variable in your `.env` file.
 
 ## Docker Deployment
 
