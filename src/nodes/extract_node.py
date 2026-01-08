@@ -15,7 +15,7 @@ from prompts import EXTRACTION_PROMPT_TEMPLATE
 from utils import (format_resistance_genes, get_icd_names_from_state, 
                    get_pathogens_from_input, format_pathogens, 
                    get_resistance_genes_from_input, create_llm, retry_with_max_attempts, RetryError,
-                   chunk_text_with_llamaindex, convert_json_to_toon, call_llm_program)
+                   chunk_text_custom, _get_overlap_text, convert_json_to_toon, call_llm_program)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def _extract_with_llamaindex(
     # Chunk the content for processing based on tokens (GPT-OSS 20B: ~4k-8k tokens typical)
     chunk_size_tokens = 2500  # Target 2.5k tokens per chunk for extraction
     chunk_overlap_tokens = 200  # 200 tokens overlap for context
-    chunks = chunk_text_with_llamaindex(content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
+    chunks = chunk_text_custom(content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
     
     from utils import _get_token_count
     total_tokens = _get_token_count(content)
@@ -100,8 +100,8 @@ def _extract_with_llamaindex(
     }
     all_resistance_genes = []
     
-    # Track previous chunks' extracted data for cross-chunk context
-    previous_chunks_extracted = []
+    # Track previous chunk text for overlap context
+    previous_chunk_text = ""
     
     # Each chunk depends on previous chunks' extractions being merged into all_antibiotics/all_resistance_genes.
     # Chunk 1's results are merged before chunk 2 is processed, so chunk 2 can see and enhance chunk 1's data.
@@ -131,13 +131,19 @@ def _extract_with_llamaindex(
                 # Convert merged extraction to TOON format (raises exception if TOON not available)
                 toon_format = convert_json_to_toon(merged_extraction)
                 
-                cross_chunk_context = f"\n\n--- WHAT WE HAVE EXTRACTED SO FAR (from previous chunks) ---\n\n```toon\n{toon_format}\n```\n\n"
-                cross_chunk_context += "INSTRUCTIONS: You can ADD NEW antibiotics or resistance genes from this chunk, or COMPLETE/ENHANCE existing ones if you find more information (e.g., missing dose_duration, renal_adjustment, or general_considerations). Do NOT duplicate antibiotics that are already listed above unless you have significantly different or more complete information.\n\n"
+                cross_chunk_context = f"\n\n```toon\n{toon_format}\n```\n\n"
+            
+            # Add overlap text from previous chunk for context (if not first chunk)
+            overlap_context = ""
+            if i > 0 and previous_chunk_text:
+                overlap_text = _get_overlap_text(previous_chunk_text, chunk_overlap_tokens)
+                if overlap_text:
+                    overlap_context = f"\n\n{overlap_text}\n\n"
             
             # Format chunk info
             chunk_info = f" (chunk {i+1} of {len(chunks)})" if len(chunks) > 1 else ""
             
-            # Format prompt with chunk and cross-chunk context
+            # Format prompt with chunk, overlap context, and cross-chunk context
             prompt = EXTRACTION_PROMPT_TEMPLATE.format(
                 pathogen_display=pathogen_name,
                 resistance_context=resistance_context,
@@ -146,7 +152,7 @@ def _extract_with_llamaindex(
                 severity_codes=severity_codes,
                 age=f"{age} years" if age else 'Not specified',
                 panel=panel or 'Not specified',
-                content=chunk,
+                content=overlap_context + chunk if overlap_context else chunk,
                 chunk_info=chunk_info,
                 cross_chunk_context=cross_chunk_context,
                 resistance_genes_section=resistance_genes_section,
@@ -187,8 +193,8 @@ def _extract_with_llamaindex(
             )
             
             if chunk_result:
-                # Store this chunk's results for cross-chunk context (use deepcopy to avoid reference issues)
-                previous_chunks_extracted.append(copy.deepcopy(chunk_result))
+                # Store this chunk's text for overlap context in next chunk
+                previous_chunk_text = chunk
                 
                 # CRITICAL: Merge results into all_antibiotics/all_resistance_genes BEFORE processing next chunk.
                 # This ensures chunk 2 can see and enhance chunk 1's extractions.
@@ -219,19 +225,22 @@ def _extract_with_llamaindex(
                             
                             if existing_ab:
                                 # Enhance existing entry with new information
-                                # Only update if new info is more complete
+                                # Replace null fields with new values, merge non-null fields
+                                
                                 if not existing_ab.get('dose_duration') and new_ab.get('dose_duration'):
                                     existing_ab['dose_duration'] = new_ab['dose_duration']
+                                
                                 if not existing_ab.get('renal_adjustment') and new_ab.get('renal_adjustment'):
                                     existing_ab['renal_adjustment'] = new_ab['renal_adjustment']
+                                
                                 if not existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
                                     existing_ab['general_considerations'] = new_ab['general_considerations']
                                 elif existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
-                                    # Merge considerations if both exist
                                     existing_cons = existing_ab['general_considerations']
                                     new_cons = new_ab['general_considerations']
                                     if new_cons not in existing_cons and len(existing_cons + '; ' + new_cons) <= 300:
                                         existing_ab['general_considerations'] = f"{existing_cons}; {new_cons}"
+                                
                                 if not existing_ab.get('coverage_for') and new_ab.get('coverage_for'):
                                     existing_ab['coverage_for'] = new_ab['coverage_for']
                             else:

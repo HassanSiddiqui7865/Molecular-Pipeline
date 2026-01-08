@@ -8,7 +8,7 @@ import threading
 import queue
 import asyncio
 from pathlib import Path
-from fastapi import FastAPI, Request, Body
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from io import BytesIO
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +21,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "src"))
 
 from nodes.search_node import PerplexitySearch
-from graph import create_pipeline_graph, run_pipeline
+from graph import create_pipeline_graph
 from config import get_perplexity_config, get_output_config
 from db_session import init_db_pool, save_session, get_session, list_sessions
 

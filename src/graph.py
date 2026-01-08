@@ -7,6 +7,7 @@ from typing import Dict, Any, TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 
 from nodes.search_node import search_node
+from nodes.clean_node import clean_node
 from nodes.extract_node import extract_node
 from nodes.parse_node import parse_node
 from nodes.rank_node import rank_node
@@ -43,6 +44,7 @@ def create_pipeline_graph() -> StateGraph:
     
     # Add nodes
     workflow.add_node("search", search_node)
+    workflow.add_node("clean", clean_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("parse", parse_node)
     workflow.add_node("rank", rank_node)
@@ -53,7 +55,8 @@ def create_pipeline_graph() -> StateGraph:
     # Define edges - ICD transform runs first
     workflow.set_entry_point("icd_transform")
     workflow.add_edge("icd_transform", "search")
-    workflow.add_edge("search", "extract")
+    workflow.add_edge("search", "clean")  # Clean search results before extraction
+    workflow.add_edge("clean", "extract")
     workflow.add_edge("extract", "parse")
     workflow.add_edge("parse", "rank")  # Rank antibiotics into final categories
     workflow.add_edge("rank", "synthesize")  # Then synthesize with clean categories

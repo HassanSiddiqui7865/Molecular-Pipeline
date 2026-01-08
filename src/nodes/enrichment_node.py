@@ -14,9 +14,9 @@ import random
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import format_resistance_genes, get_icd_names_from_state, create_llm, retry_with_max_attempts, RetryError, chunk_text_with_llamaindex
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm, retry_with_max_attempts, RetryError, chunk_text_custom, _get_overlap_text
 from schemas import AntibioticMatchResult, DosageExtractionResult
-from prompts import ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE, DOSAGE_EXTRACTION_PROMPT_TEMPLATE
+from prompts import ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE_OPT, DOSAGE_EXTRACTION_PROMPT_TEMPLATE_OPT
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ def _validate_antibiotic_match(
             return True  # Fail open if no title
         
         # Format prompt
-        prompt = ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE.format(
+        prompt = ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE_OPT.format(
             antibiotic_name=antibiotic_name,
             page_title=page_title
         )
@@ -716,10 +716,6 @@ def _scrape_drugs_com_page(url: str, antibiotic_name: str, driver: Any) -> tuple
     except Exception as e:
         logger.error(f"Error scraping {url}: {e}")
         return None, []
-        
-    except Exception as e:
-        logger.error(f"Error scraping {url}: {e}")
-        return None
 
 
 
@@ -801,10 +797,10 @@ def _extract_fields_with_llamaindex(
             if existing_fields:
                 existing_data_context = "\n".join(existing_fields)
         
-        # Chunk the content using token-based chunking (GPT-OSS 20B: ~4k-8k tokens typical)
-        chunk_size_tokens = 6000  # Target 6k tokens per chunk
-        chunk_overlap_tokens = 200  # 200 tokens overlap for cross-chunk context
-        chunks = chunk_text_with_llamaindex(page_content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
+        # Chunk the content using custom token-based chunking
+        chunk_size_tokens = 6000
+        chunk_overlap_tokens = 200
+        chunks = chunk_text_custom(page_content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
         
         from utils import _get_token_count
         total_tokens = _get_token_count(page_content)
@@ -819,22 +815,47 @@ def _extract_fields_with_llamaindex(
             'renal_adjustment': []
         }
         
-        # Track previous chunks' extracted fields for cross-chunk context
-        previous_chunks_context = []
+        # Track previous chunk text for cross-chunk context
+        previous_chunk_text = ""
         
         for i, chunk in enumerate(chunks):
             def _process_chunk():
-                # Build cross-chunk context from previous chunks
+                # Build cross-chunk context showing what's extracted and what's still missing
                 cross_chunk_context = ""
-                if previous_chunks_context:
-                    cross_chunk_context = "\n\nPREVIOUS CHUNKS CONTEXT (for consistency):\n"
-                    for prev_idx, prev_fields in enumerate(previous_chunks_context[-3:], start=1):  # Last 3 chunks
-                        prev_summary = ", ".join([f"{k}={v[:50]}" for k, v in prev_fields.items() if v])
-                        if prev_summary:
-                            cross_chunk_context += f"Chunk {prev_idx}: {prev_summary}\n"
+                has_extracted_data = any(all_results.values())
                 
-                # Format prompt with cross-chunk context
-                prompt = DOSAGE_EXTRACTION_PROMPT_TEMPLATE.format(
+                if has_extracted_data or i > 0:
+                    extracted_summary = {}
+                    still_missing = []
+                    
+                    for field in ['dose_duration', 'route_of_administration', 'coverage_for', 'renal_adjustment', 'general_considerations']:
+                        if field in missing_fields:
+                            if all_results[field]:
+                                extracted_summary[field] = all_results[field][0]
+                            else:
+                                still_missing.append(field)
+                    
+                    context_parts = []
+                    if extracted_summary:
+                        summary_lines = [f"{k}={v[:80]}" for k, v in extracted_summary.items() if v]
+                        if summary_lines:
+                            context_parts.append("\n".join(summary_lines))
+                    
+                    if still_missing:
+                        context_parts.append(f"Still missing: {', '.join(still_missing)}")
+                    
+                    if context_parts:
+                        cross_chunk_context = "\n\n" + "\n".join(context_parts) + "\n\n"
+                
+                # Add overlap text from previous chunk for context
+                overlap_context = ""
+                if i > 0 and previous_chunk_text:
+                    overlap_text = _get_overlap_text(previous_chunk_text, chunk_overlap_tokens)
+                    if overlap_text:
+                        overlap_context = f"\n\n{overlap_text}\n\n"
+                
+                # Format prompt with overlap and cross-chunk context
+                prompt = DOSAGE_EXTRACTION_PROMPT_TEMPLATE_OPT.format(
                     medical_name=medical_name,
                     patient_age=patient_age_str,
                     icd_codes=icd_code_names_str,
@@ -846,7 +867,7 @@ def _extract_fields_with_llamaindex(
                     cross_chunk_context=cross_chunk_context,
                     chunk_num=i+1,
                     total_chunks=len(chunks),
-                    chunk_content=chunk
+                    chunk_content=overlap_context + chunk if overlap_context else chunk
                 )
                 
                 # Use LlamaIndex for structured extraction
@@ -872,119 +893,97 @@ def _extract_fields_with_llamaindex(
                     should_retry_on_empty=True
                 )
                 
-                # Store extracted fields from this chunk for cross-chunk context
-                extracted_from_chunk = {}
+                # Store extracted fields from this chunk and merge into all_results
                 if 'dose_duration' in missing_fields and result.dose_duration:
                     all_results['dose_duration'].append(result.dose_duration)
-                    extracted_from_chunk['dose_duration'] = result.dose_duration
                 if 'route_of_administration' in missing_fields and result.route_of_administration:
                     all_results['route_of_administration'].append(result.route_of_administration)
-                    extracted_from_chunk['route_of_administration'] = result.route_of_administration
                 if 'general_considerations' in missing_fields and result.general_considerations:
                     all_results['general_considerations'].append(result.general_considerations)
-                    extracted_from_chunk['general_considerations'] = result.general_considerations
                 if 'coverage_for' in missing_fields and result.coverage_for:
                     all_results['coverage_for'].append(result.coverage_for)
-                    extracted_from_chunk['coverage_for'] = result.coverage_for
                 if 'renal_adjustment' in missing_fields and result.renal_adjustment:
                     all_results['renal_adjustment'].append(result.renal_adjustment)
-                    extracted_from_chunk['renal_adjustment'] = result.renal_adjustment
                 
-                # Store context for next chunks
-                if extracted_from_chunk:
-                    previous_chunks_context.append(extracted_from_chunk)
+                # Store this chunk's text for overlap context in next chunk
+                previous_chunk_text = chunk
                     
             except RetryError as e:
                 logger.error(f"Chunk {i+1} extraction failed after max attempts for {medical_name}: {e}")
                 raise
         
-        # Merge results: blend with existing data
+        # Merge results: blend with existing data, use latest extracted value for each field
         extracted = {}
         
-        # For each field, use existing if present, otherwise use first extracted value
-        for field in ['dose_duration', 'route_of_administration', 'coverage_for', 'renal_adjustment']:
+        # Always preserve route_of_administration from existing data (should always be present from extraction)
+        extracted['route_of_administration'] = existing_data.get('route_of_administration')
+        if not extracted['route_of_administration']:
+            logger.warning(f"route_of_administration is missing for {existing_data.get('medical_name', 'unknown')} - this should not happen")
+        
+        # For each field, use existing if present, otherwise use latest extracted value (from later chunks)
+        for field in ['dose_duration', 'coverage_for', 'renal_adjustment']:
             if field in missing_fields:
                 if all_results[field]:
                     if field == 'dose_duration':
                         # For dose_duration, prioritize shorter durations when multiple options exist
                         dosages = all_results[field]
                         # Sort by duration length (shorter first)
-                        # Extract duration from each dosage string
                         def get_duration_days(dosage_str):
                             """Extract duration in days from dosage string, return a sortable value."""
                             if not dosage_str:
-                                return 9999  # Put null/empty at end
+                                return 9999
                             dosage_lower = dosage_str.lower()
-                            # Look for patterns like "for X days", "for X weeks", "single dose", etc.
-                            # Single dose
                             if 'single' in dosage_lower or 'once' in dosage_lower:
                                 return 0.1
-                            # Days
                             day_match = re.search(r'for\s+(\d+)\s+days?', dosage_lower)
                             if day_match:
                                 return int(day_match.group(1))
-                            # Weeks
                             week_match = re.search(r'for\s+(\d+)\s+weeks?', dosage_lower)
                             if week_match:
                                 return int(week_match.group(1)) * 7
-                            # Months
                             month_match = re.search(r'for\s+(\d+)\s+months?', dosage_lower)
                             if month_match:
                                 return int(month_match.group(1)) * 30
-                            # If no duration found, prefer shorter-looking strings (likely incomplete)
                             return 5000 + len(dosage_str)
                         
-                        # Sort by duration (shorter first)
                         dosages_sorted = sorted(dosages, key=get_duration_days)
                         extracted[field] = dosages_sorted[0]
                         if len(dosages) > 1:
                             logger.info(f"Multiple dosages found for {existing_data.get('medical_name', 'unknown')}, selected shortest: {extracted[field]}")
                     else:
-                        extracted[field] = all_results[field][0]
+                        # Use latest extracted value (from later chunks)
+                        extracted[field] = all_results[field][-1]
                 elif existing_data.get(field):
-                    # Keep existing if extraction failed
                     extracted[field] = existing_data[field]
                 else:
                     extracted[field] = None
             else:
-                # Not missing, preserve existing
                 extracted[field] = existing_data.get(field)
         
       
         # renal_adjustment is handled by LLM during extraction - no programmatic logic needed
         
-        # Special handling for general_considerations - blend if both exist
+        # Special handling for general_considerations - use latest extracted, merge if multiple
         if 'general_considerations' in missing_fields:
             if all_results['general_considerations']:
                 considerations = all_results['general_considerations']
-                considerations.sort(key=len)
-                
                 if existing_data.get('general_considerations'):
-                    # Blend with existing
+                    # Merge with existing
                     existing_cons = existing_data['general_considerations']
-                    new_cons = considerations[0]
-                    # Combine if total length is reasonable
-                    combined = f"{existing_cons}. {new_cons}"
+                    latest_cons = considerations[-1]
+                    combined = f"{existing_cons}. {latest_cons}"
                     if len(combined) <= 300:
                         extracted['general_considerations'] = combined
                     else:
-                        extracted['general_considerations'] = existing_cons  # Keep existing if too long
+                        extracted['general_considerations'] = latest_cons
                 else:
-                    # No existing, use extracted
-                    if len(considerations) == 1:
-                        extracted['general_considerations'] = considerations[0]
-                    else:
-                        combined = " ".join(considerations[:2])
-                        if len(combined) > 300:
-                            extracted['general_considerations'] = considerations[0]
-                        else:
-                            extracted['general_considerations'] = combined
+                    # Use latest extracted value
+                    extracted['general_considerations'] = considerations[-1]
             elif existing_data.get('general_considerations'):
                 extracted['general_considerations'] = existing_data['general_considerations']
             else:
                 extracted['general_considerations'] = None
         else:
-            # Not missing, preserve existing
             extracted['general_considerations'] = existing_data.get('general_considerations')
         
         logger.info(f"Extracted fields for {medical_name}: {[k for k, v in extracted.items() if v and k in missing_fields]}")
@@ -1019,11 +1018,11 @@ def _scrape_antibiotic_page(
         return (category, idx, None, [], False, 0, [])
     
     # Determine which fields are missing - check ALL fields that are null
+    # NOTE: route_of_administration should always be present from extraction, so we don't check it here
     missing_fields = []
     if antibiotic.get('dose_duration') is None:
         missing_fields.append('dose_duration')
-    if antibiotic.get('route_of_administration') is None:
-        missing_fields.append('route_of_administration')
+    # route_of_administration should always be there from extraction - skip it
     if antibiotic.get('coverage_for') is None:
         missing_fields.append('coverage_for')
     if antibiotic.get('renal_adjustment') is None:
@@ -1056,8 +1055,8 @@ def _scrape_antibiotic_page(
             page_content, references = _scrape_drugs_com_page(drugs_com_url, medical_name, driver)
             
             if page_content:
-                # Calculate number of chunks using token-based chunking
-                chunks = chunk_text_with_llamaindex(page_content, chunk_size_tokens=6000, chunk_overlap_tokens=200)
+                # Calculate number of chunks using custom chunking
+                chunks = chunk_text_custom(page_content, chunk_size_tokens=6000, chunk_overlap_tokens=200)
                 num_chunks = len(chunks)
                 from utils import _get_token_count
                 total_tokens = _get_token_count(page_content)
@@ -1132,11 +1131,11 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     continue
                 
                 # Check which fields are missing - extract ALL null fields from drugs.com
+                # NOTE: route_of_administration should always be present from extraction, so we don't check it here
                 missing_fields = []
                 if antibiotic.get('dose_duration') is None:
                     missing_fields.append('dose_duration')
-                if antibiotic.get('route_of_administration') is None:
-                    missing_fields.append('route_of_administration')
+                # route_of_administration should always be there from extraction - skip it
                 if antibiotic.get('coverage_for') is None:
                     missing_fields.append('coverage_for')
                 if antibiotic.get('renal_adjustment') is None:
@@ -1194,7 +1193,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Step 1: Scrape page content (with validation)
                 logger.info(f"  [1/2] Scraping {medical_name} from drugs.com...")
-                category_result, idx_result, page_content, scraped_missing_fields, validation_failed, num_chunks, references = _scrape_antibiotic_page(antibiotic, category, idx)
+                _, _, page_content, _, validation_failed, num_chunks, references = _scrape_antibiotic_page(antibiotic, category, idx)
                 
                 # If validation failed (name doesn't match), mark for removal
                 if validation_failed:
@@ -1358,7 +1357,6 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     # Step 3: Process sequentially, trying to get enough complete ones
                     # For alternative_antibiotic: if extraction fails for one, we can try others
                     # Note: processed_count continues from first_choice/second_choice processing above
-                    successfully_completed = []
                     processed_indices = set()
                     alternative_completed = 0
                     
@@ -1419,7 +1417,6 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             processed_indices.add(idx)
                             
                             if antibiotic['is_complete']:
-                                successfully_completed.append((category, idx))
                                 logger.info(f"  ✓ Completed enrichment for {medical_name} (is_complete=True)")
                             elif updated:
                                 # Got some fields but not complete - keep it for alternative_antibiotic

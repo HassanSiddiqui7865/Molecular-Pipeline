@@ -27,7 +27,7 @@ If no explicit language indicates second_choice or alternative_antibiotic, keep 
 Each antibiotic must appear in only one category.
 
 coverage_for
-Format as "[Pathogen] [condition]" using ONLY pathogens listed in {pathogen_display}. Do NOT create coverage entries for pathogens not present in the input context. Map panel to condition as follows. Bacterial vaginosis, vaginitis, vaginal infection map to vaginal infection. Blood, systemic, sepsis map to bacteremia. Urine or UTI map to UTI. Sputum, respiratory, pneumonia map to pneumonia. CSF or meningitis map to meningitis. Wound map to wound infection. Other panels map to Other. If multiple pathogens from {pathogen_display} apply, format as "[Pathogen1] [condition]; [Pathogen2] [condition]".
+Extract pathogen names only using ONLY pathogens listed in {pathogen_display}. Do NOT include pathogens not present in the input context. If the drug covers multiple pathogens, list them comma-separated. Examples: "MRSA", "E. coli", "MRSA, E. coli, Klebsiella".
 
 route_of_administration
 Extract explicit routes or infer from dosing context. Valid routes are IV, PO, IM, Vaginal, Intravaginal, Topical, Ophthalmic, Otic, Nasal, Rectal, Inhalation, Sublingual, Buccal. Extract combined routes such as IV/PO ONLY if explicitly stated as interchangeable. If the same drug appears with multiple routes, extract separate entries per route. Use null if route information is missing.
@@ -84,7 +84,7 @@ UNIFICATION RULES:
 
 medical_name: Use only names from entries. Remove formulations (Gel, Cream, Ointment, Solution, Suspension, Tablet, Capsule, Injection, etc.). Use most standard/complete form. Title Case. For combinations, use lowercase "plus" (e.g., "Trimethoprim plus Sulfamethoxazole"). Keep "Drug1 plus Drug2" format. Do not invent names.
 
-coverage_for: Use only indications from entries. Prioritize guideline sources first. Use the most specific pathogen/condition. Format: "[Pathogen] [condition]". Do not combine multiple indications. Do not invent.
+coverage_for: Extract pathogen names only from entries. If multiple pathogens are mentioned, combine them comma-separated. Prioritize guideline sources first. Use only pathogen names from entries. Do not invent.
 
 route_of_administration: Must match the fixed route ({route_of_administration}). Do not change or combine routes. If the route in entries differs, ignore it.
 
@@ -178,7 +178,7 @@ Do not include drug name in dose_duration. Examples: "500 mg IV q8h for 7 days" 
 
 route_of_administration: Extract only if missing in existing_data. Preserve existing route if present. Use exact route in content; do not combine routes unless explicitly a single combined route (e.g., IV/PO). Null if no info.
 
-coverage_for: Format "[Pathogen] [condition]" (e.g., "MRSA bacteremia", "VRE bacteremia"). Match patient context (ICD: {icd_codes}{gene_context}). Null if no info.
+coverage_for: Extract pathogen names only. If multiple pathogens apply, list them comma-separated (e.g., "MRSA", "VRE", "MRSA, E. coli"). Match patient context (ICD: {icd_codes}{gene_context}). Null if no info.
 
 renal_adjustment: Extract only if explicitly mentioned. For systemic: "No Renal Adjustment" or "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Non-systemic: "No Renal Adjustment" if stated; otherwise null. Do not invent. Do not duplicate general_considerations.
 
@@ -193,4 +193,29 @@ CRITICAL RULES:
 
 
 SEARCH_PROMPT_TEMPLATE = """Evidence-based antibiotic dosing regimens for {pathogen_name}{resistance_phrase}{condition_text}, specifying drug names, dosing, dosing frequency, route of administration, and treatment duration, with brief antimicrobial stewardship considerations{severity_codes_text}"""
+
+
+GUIDELINE_CLEANING_PROMPT_TEMPLATE = """Clean and convert unstructured guideline content into plain natural language while preserving ALL context.
+
+CRITICAL REQUIREMENTS:
+1. PRESERVE EVERY PIECE OF CONTEXT - This is extremely critical. Do not lose any information, details, numbers, dosages, conditions, warnings, or any medical content.
+2. Convert to plain natural language that reads like a clinical guideline itself.
+3. Remove ALL formatting: no tables, no bullet points, no markdown, no HTML, no special characters used for formatting.
+4. Remove styling artifacts: no bold, italic, headers, footers, citations in brackets, reference numbers.
+5. Convert structured data (tables, lists) into flowing natural language sentences.
+6. Maintain medical accuracy and preserve all dosages, frequencies, durations, conditions, and clinical information exactly.
+7. Write in a clear, professional medical guideline style using complete sentences.
+
+INPUT CONTENT:
+{content}
+
+TASK: Transform this content into clean, plain natural language that:
+- Reads like a clinical practice guideline
+- Preserves ALL medical information, dosages, conditions, warnings, and context
+- Uses complete sentences in natural flowing prose
+- Removes all formatting, tables, lists, and styling
+- Maintains professional medical writing style
+- Is ready for further processing without any formatting artifacts
+
+OUTPUT: Provide ONLY the cleaned plain text guideline. No explanations, no metadata, just the cleaned content."""
 

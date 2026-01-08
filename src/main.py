@@ -25,8 +25,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-
-
 def save_output(data: Dict, output_path: str):
     """Save extracted data to JSON file."""
     output_dir = Path(output_path).parent

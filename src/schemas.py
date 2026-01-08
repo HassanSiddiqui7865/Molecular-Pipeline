@@ -105,3 +105,8 @@ class DosageExtractionResult(BaseModel):
     coverage_for: Optional[str] = None
     renal_adjustment: Optional[str] = None
 
+
+class CleanedGuidelineResult(BaseModel):
+    """Schema for cleaned guideline text."""
+    cleaned_text: str = Field(description="Cleaned plain text guideline in natural language, preserving all context")
+

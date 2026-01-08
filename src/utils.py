@@ -5,7 +5,6 @@ import logging
 import time
 import re
 import json
-import copy
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable
@@ -15,23 +14,6 @@ logger = logging.getLogger(__name__)
 # LLM input logging
 _llm_log_file = None
 _llm_log_enabled = True
-
-# NLTK imports with fallback
-try:
-    import nltk
-    NLTK_AVAILABLE = True
-    # Download punkt tokenizer if not already downloaded
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        logger.info("Downloading NLTK punkt tokenizer...")
-        nltk.download('punkt', quiet=True)
-except ImportError:
-    logger.error("NLTK not available. Install: pip install nltk")
-    NLTK_AVAILABLE = False
-except Exception as e:
-    logger.warning(f"NLTK setup issue: {e}")
-    NLTK_AVAILABLE = False
 
 # LlamaIndex imports with fallback
 try:
@@ -610,56 +592,6 @@ def _get_token_count(text: str, encoding_name: str = "cl100k_base") -> int:
         return len(text) // 4
 
 
-def chunk_text_with_llamaindex(text: str, chunk_size_tokens: int = 6000, chunk_overlap_tokens: int = 200) -> List[str]:
-    """
-    Split text into chunks based on token count using LlamaIndex TokenTextSplitter.
-    Uses LlamaIndex's native token splitter for accurate token-based chunking.
-    Shared utility function for both extraction and enrichment nodes.
-    
-    Args:
-        text: Text to chunk
-        chunk_size_tokens: Maximum number of tokens per chunk (default: 6000 for GPT-OSS 20B)
-        chunk_overlap_tokens: Number of tokens to overlap between chunks (default: 200)
-        
-    Returns:
-        List of text chunks
-    """
-    if not text:
-        return []
-    
-    # Count total tokens
-    total_tokens = _get_token_count(text)
-    
-    # If text fits in one chunk, return as-is
-    if total_tokens <= chunk_size_tokens:
-        logger.debug(f"Text fits in single chunk ({total_tokens} tokens)")
-        return [text]
-    
-    # Use LlamaIndex TokenTextSplitter (required, no fallback)
-    if not LLAMAINDEX_AVAILABLE:
-        raise ImportError("LlamaIndex is required for chunking. Install with: pip install llama-index")
-    
-    from llama_index.core.node_parser import TokenTextSplitter
-    from llama_index.core.schema import Document
-    
-    # Create TokenTextSplitter with token-based chunking
-    # TokenTextSplitter uses tiktoken internally with default encoding
-    splitter = TokenTextSplitter(
-        chunk_size=chunk_size_tokens,
-        chunk_overlap=chunk_overlap_tokens,
-        separator=" "
-    )
-    
-    doc = Document(text=text)
-    nodes = splitter.get_nodes_from_documents([doc])
-    
-    # Extract text from nodes
-    chunks = [node.text for node in nodes]
-    
-    logger.debug(f"Split text into {len(chunks)} chunks using LlamaIndex TokenTextSplitter (total: {total_tokens} tokens, target: {chunk_size_tokens} tokens/chunk)")
-    return chunks if chunks else [text]
-
-
 def _get_overlap_text(text: str, overlap_tokens: int) -> str:
     """
     Get the last portion of text that contains approximately overlap_tokens tokens.
@@ -688,6 +620,60 @@ def _get_overlap_text(text: str, overlap_tokens: int) -> str:
     except Exception as e:
         logger.error(f"Error calculating overlap: {e}")
         raise
+
+
+def chunk_text_custom(text: str, chunk_size_tokens: int = 2500, chunk_overlap_tokens: int = 200) -> List[str]:
+    """
+    Custom chunking function that splits text into chunks based on token count.
+    Does NOT use LlamaIndex - uses tiktoken directly for token-based chunking.
+    
+    Args:
+        text: Text to chunk
+        chunk_size_tokens: Maximum number of tokens per chunk
+        chunk_overlap_tokens: Number of tokens to overlap between chunks
+        
+    Returns:
+        List of text chunks
+    """
+    if not text:
+        return []
+    
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except ImportError:
+        logger.error("tiktoken is required for custom chunking. Install with: pip install tiktoken")
+        raise ImportError("tiktoken is required for custom chunking")
+    
+    # Encode text to tokens
+    tokens = encoding.encode(text)
+    total_tokens = len(tokens)
+    
+    # If text fits in one chunk, return as-is
+    if total_tokens <= chunk_size_tokens:
+        logger.debug(f"Text fits in single chunk ({total_tokens} tokens)")
+        return [text]
+    
+    # Split into chunks with overlap
+    chunks = []
+    start_idx = 0
+    
+    while start_idx < total_tokens:
+        # Calculate end index for this chunk
+        end_idx = min(start_idx + chunk_size_tokens, total_tokens)
+        
+        # Extract tokens for this chunk
+        chunk_tokens = tokens[start_idx:end_idx]
+        chunk_text = encoding.decode(chunk_tokens)
+        chunks.append(chunk_text)
+        
+        # Move start index forward, accounting for overlap
+        if end_idx >= total_tokens:
+            break
+        start_idx = end_idx - chunk_overlap_tokens
+    
+    logger.debug(f"Split text into {len(chunks)} chunks using custom chunking (total: {total_tokens} tokens, target: {chunk_size_tokens} tokens/chunk, overlap: {chunk_overlap_tokens} tokens)")
+    return chunks if chunks else [text]
 
 
 def convert_json_to_toon(json_data: Dict[str, Any]) -> str:
