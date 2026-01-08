@@ -197,8 +197,21 @@ def _determine_final_category(
     elif alt_pct > 0.6:
         return 'alternative_antibiotic'
     
-    # Weighted majority
-    max_category = max(weighted_scores.items(), key=lambda x: x[1])[0]
+    # Weighted majority with deterministic tie-breaking
+    category_priority = {
+        'first_choice': 3,
+        'second_choice': 2,
+        'alternative_antibiotic': 1
+    }
+    
+    # Sort by score (descending), then by category priority (descending) for tie-breaking
+    sorted_categories = sorted(
+        weighted_scores.items(),
+        key=lambda x: (x[1], category_priority.get(x[0], 0)),
+        reverse=True
+    )
+    
+    max_category = sorted_categories[0][0] if sorted_categories else 'alternative_antibiotic'
     return max_category
 
 
@@ -316,6 +329,9 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         total_sources = len(source_results)
         
         antibiotic_groups = defaultdict(list)
+        # Track ALL sources for each antibiotic (by normalized name only, ignoring route)
+        # This ensures we capture all sources even if the antibiotic appears with different routes
+        antibiotic_sources_map = defaultdict(set)  # normalized_name -> set of source_indices
         
         for source_result in source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
@@ -340,6 +356,10 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if not normalized_name:
                         continue
                     
+                    # Track this source for this antibiotic (regardless of route)
+                    if source_index > 0:
+                        antibiotic_sources_map[normalized_name].add(source_index)
+                    
                     # Get route_of_administration for grouping key
                     route = antibiotic.get('route_of_administration', '').strip() if antibiotic.get('route_of_administration') else ''
                     # Normalize route (handle None, empty strings, etc.)
@@ -357,6 +377,7 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     })
             
         logger.info(f"Grouped {len(antibiotic_groups)} unique antibiotics from {total_sources} sources")
+        logger.debug(f"Source tracking map: {len(antibiotic_sources_map)} unique antibiotics tracked across all routes")
         
         # Get progress callback from metadata
         metadata = state.get('metadata', {})
@@ -369,8 +390,23 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         for group_key, entries in antibiotic_groups.items():
             normalized_name, route_key = group_key
-            # Get source indices for this antibiotic
-            source_indices = sorted(set(e.get('source_index', 0) for e in entries if e.get('source_index', 0) > 0))
+            # Use comprehensive source map to get ALL sources for this antibiotic
+            # This ensures we capture sources even if they appear with different routes
+            all_source_indices = sorted(antibiotic_sources_map.get(normalized_name, set()))
+            
+            # Also collect sources from entries in this group (for backward compatibility and logging)
+            group_source_indices = sorted(set(e.get('source_index', 0) for e in entries if e.get('source_index', 0) > 0))
+            
+            # Use the comprehensive list (all sources) instead of just group sources
+            source_indices = all_source_indices
+            
+            # Log if there's a discrepancy (for debugging)
+            if len(all_source_indices) != len(group_source_indices):
+                logger.debug(
+                    f"Source count discrepancy for {normalized_name} (route={route_key}): "
+                    f"comprehensive={len(all_source_indices)} sources, group-only={len(group_source_indices)} sources. "
+                    f"Using comprehensive list."
+                )
             
             # Get the route for this group (all entries should have the same route)
             route = entries[0].get('route_of_administration', '') if entries else ''
@@ -446,11 +482,14 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
         def convert_indices_to_urls(antibiotics_list):
             for ab in antibiotics_list:
                 if 'mentioned_in_sources' in ab:
+                    # Filter out empty URLs and ensure we only include valid URLs
                     ab['mentioned_in_sources'] = [
                         source_index_to_url.get(idx, '') 
                         for idx in ab['mentioned_in_sources'] 
-                        if source_index_to_url.get(idx, '')
+                        if source_index_to_url.get(idx, '')  # Only include if URL exists
                     ]
+                    # Remove duplicates (in case of any edge cases)
+                    ab['mentioned_in_sources'] = sorted(list(set(ab['mentioned_in_sources'])))
         
         convert_indices_to_urls(result_categories['first_choice'])
         convert_indices_to_urls(result_categories['second_choice'])

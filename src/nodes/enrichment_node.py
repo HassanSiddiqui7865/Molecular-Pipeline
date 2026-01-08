@@ -1349,9 +1349,13 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 # Step 2: Select top N with fewer chunks (where N = needed, excluding validation failures)
                 if scraped_alternative:
                     # Sort by number of chunks (ascending - fewer chunks first)
+                    # Add secondary sort by medical_name for deterministic ordering
                     sorted_alternatives = sorted(
                         scraped_alternative.items(),
-                        key=lambda x: x[1][3] if len(x[1]) > 3 else float('inf')  # Sort by num_chunks (4th element)
+                        key=lambda x: (
+                            x[1][3] if len(x[1]) > 3 else float('inf'),  # Sort by num_chunks (4th element)
+                            x[1][2].get('medical_name', '') if len(x[1]) > 2 and isinstance(x[1][2], dict) else ''  # Secondary sort by name
+                        )
                     )
                     
                     # Step 3: Process sequentially, trying to get enough complete ones
@@ -1473,7 +1477,7 @@ def enrichment_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 for idx, ab in enumerate(antibiotics):
                     medical_name = ab.get('medical_name', '')
                     
-                    # CRITICAL: Remove antibiotics with null critical fields
+                    # Remove antibiotics with null critical fields
                     if (not medical_name or 
                         ab.get('dose_duration') is None or 
                         ab.get('coverage_for') is None or 
@@ -1547,7 +1551,7 @@ def _group_and_unify_antibiotics(therapy_plan: Dict[str, Any]) -> None:
             continue
         
         # Group antibiotics by medical_name
-        # CRITICAL: Skip antibiotics with null critical fields (safety check)
+        # Skip antibiotics with null critical fields (safety check)
         grouped = {}
         for ab in antibiotics:
             if not isinstance(ab, dict):

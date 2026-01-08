@@ -16,6 +16,72 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 
+def _get_deterministic_max_category(weighted_scores: Dict[str, float]) -> tuple:
+    """
+    Get the category with maximum weighted score, with deterministic tie-breaking.
+    When scores are equal, prefer: first_choice > second_choice > alternative_antibiotic
+    
+    Args:
+        weighted_scores: Dictionary of category -> weighted score
+        
+    Returns:
+        Tuple of (category, score) with deterministic tie-breaking
+    """
+    # Category hierarchy for tie-breaking (higher priority first)
+    category_priority = {
+        'first_choice': 3,
+        'second_choice': 2,
+        'alternative_antibiotic': 1
+    }
+    
+    # Sort by score (descending), then by category priority (descending) for tie-breaking
+    sorted_items = sorted(
+        weighted_scores.items(),
+        key=lambda x: (x[1], category_priority.get(x[0], 0)),
+        reverse=True
+    )
+    
+    return sorted_items[0] if sorted_items else ('alternative_antibiotic', 0.0)
+
+
+def _should_filter_antibiotic(ab_entry: Dict[str, Any], systemic: Any) -> bool:
+    """
+    Determine if an antibiotic should be filtered based on route and systemic flag.
+    
+    Args:
+        ab_entry: Antibiotic dictionary
+        systemic: Systemic flag (True, False, or None)
+        
+    Returns:
+        True if antibiotic should be filtered out, False otherwise
+    """
+    route = ab_entry.get('route_of_administration')
+    if route is None:
+        route = ''
+    else:
+        route = str(route).strip()
+    
+    # Always filter out null/empty routes
+    if not route:
+        return True
+    
+    # Filter based on systemic flag (only if systemic is not None)
+    if systemic is not None:
+        systemic_routes = {'IV', 'PO', 'IM'}
+        route_upper = route.upper()
+        route_is_systemic = route_upper in systemic_routes
+        
+        if systemic is True:
+            # Only keep routes that are IV, PO, or IM
+            if not route_is_systemic:
+                return True
+        elif systemic is False:
+            # Exclude routes that are IV, PO, or IM
+            if route_is_systemic:
+                return True
+    
+    return False
+
 
 def _calculate_rank_score(
     first_choice: int,
@@ -110,9 +176,9 @@ def _calculate_rank_score(
         final_category = 'alternative_antibiotic'
         ranking_reason = f"Strong consensus: {alt_pct:.0%} categorize as alternative"
     
-    # Rule 2: Moderate consensus (40-60%) → weighted majority
+    # Rule 2: Moderate consensus (40-60%) → weighted majority with deterministic tie-breaking
     elif first_pct >= 0.4 or second_pct >= 0.4 or alt_pct >= 0.4:
-        max_weighted = max(weighted_scores.items(), key=lambda x: x[1])
+        max_weighted = _get_deterministic_max_category(weighted_scores)
         final_category = max_weighted[0]
         
         # Build reason
@@ -126,9 +192,9 @@ def _calculate_rank_score(
         
         ranking_reason = f"Moderate consensus ({max_weighted[0]}: {max_weighted[1]:.1f} score) - {', '.join(parts)}"
     
-    # Rule 3: Low consensus (<40%) → weighted majority with confidence check
+    # Rule 3: Low consensus (<40%) → weighted majority with confidence check and deterministic tie-breaking
     else:
-        max_weighted = max(weighted_scores.items(), key=lambda x: x[1])
+        max_weighted = _get_deterministic_max_category(weighted_scores)
         final_category = max_weighted[0]
         
         parts = []
@@ -173,7 +239,7 @@ def _calculate_rank_score(
 def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Node that groups antibiotics by name and reorganizes them into final ranked categories.
-    Antibiotics are already filtered during extraction based on input parameters.
+    Filters routes BEFORE ranking to ensure consistency.
     Keeps same source_results structure but places antibiotics in their final categories.
     """
     try:
@@ -183,7 +249,53 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.info("No source results to rank")
             return {'source_results': []}
         
-        # Step 1: Collect all antibiotics from all sources, grouped by normalized name
+        # Get input parameters for filtering
+        input_params = state.get('input_parameters', {})
+        systemic = input_params.get('systemic')
+        
+        # Get progress callback from metadata if available
+        metadata = state.get('metadata', {})
+        progress_callback = metadata.get('progress_callback')
+        
+        # Emit progress for ranking start
+        if progress_callback:
+            progress_callback('rank', 0, 'Starting ranking...')
+        
+        # Filter routes BEFORE counting for ranking
+        # This ensures ranking is based on antibiotics that will actually survive filtering
+        filtered_source_results = []
+        for source_result in source_results:
+            therapy_plan = source_result.get('antibiotic_therapy_plan', {})
+            
+            # Filter antibiotics based on route
+            filtered_plan = {
+                'first_choice': [],
+                'second_choice': [],
+                'alternative_antibiotic': []
+            }
+            
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
+                antibiotics = therapy_plan.get(category, [])
+                if isinstance(antibiotics, list):
+                    for ab_entry in antibiotics:
+                        if isinstance(ab_entry, dict):
+                            medical_name = ab_entry.get('medical_name', '').strip()
+                            if not medical_name:
+                                continue
+                            
+                            # Filter based on route
+                            if not _should_filter_antibiotic(ab_entry, systemic):
+                                filtered_plan[category].append(ab_entry)
+                            else:
+                                route = ab_entry.get('route_of_administration', 'null/empty')
+                                logger.debug(f"  [Pre-filter] Filtered out {medical_name}: route '{route}' (systemic={systemic})")
+            
+            # Create filtered source result
+            filtered_source_result = source_result.copy()
+            filtered_source_result['antibiotic_therapy_plan'] = filtered_plan
+            filtered_source_results.append(filtered_source_result)
+        
+        # Step 1: Collect all antibiotics from FILTERED sources, grouped by normalized name
         antibiotic_groups = defaultdict(lambda: {
             'first_choice': 0,
             'second_choice': 0,
@@ -198,18 +310,9 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'alternative_antibiotic': 0
         })
         
-        total_sources = len(source_results)
+        total_sources = len(filtered_source_results)
         
-        # Get progress callback from metadata if available
-        metadata = state.get('metadata', {})
-        progress_callback = metadata.get('progress_callback')
-        
-        # Emit progress for ranking start
-        if progress_callback:
-            progress_callback('rank', 0, 'Starting ranking...')
-        
-        # Step 1: Collect all antibiotics from all sources, grouped by normalized name
-        for source_result in source_results:
+        for source_result in filtered_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
             
             # Count occurrences in each category
@@ -227,7 +330,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Emit progress after collection
         if progress_callback:
-            progress_callback('rank', 20, f'Collected {len(antibiotic_groups)} unique antibiotics')
+            progress_callback('rank', 20, f'Collected {len(antibiotic_groups)} unique antibiotics (after route filtering)')
         
         # Step 2: Rank each antibiotic group and determine final category
         final_categories = {}  # normalized_name -> final_category
@@ -254,11 +357,11 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if progress_callback:
             progress_callback('rank', 50, 'Reorganizing antibiotics into final categories...')
         
-        # Step 3: Reorganize each source_result - place antibiotics in their final categories
+        # Step 3: Reorganize each FILTERED source_result - place antibiotics in their final categories
         updated_source_results = []
-        total_sources_to_reorganize = len(source_results)
+        total_sources_to_reorganize = len(filtered_source_results)
         
-        for idx, source_result in enumerate(source_results):
+        for idx, source_result in enumerate(filtered_source_results):
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
             
             # Collect all antibiotics from this source
@@ -295,83 +398,6 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 sub_progress = 50 + ((idx + 1) / total_sources_to_reorganize * 20)  # 50-70% for reorganization
                 progress_callback('rank', sub_progress, f'Reorganized {idx + 1}/{total_sources_to_reorganize} sources')
         
-        # Filter routes based on systemic flag before counting
-        input_params = state.get('input_parameters', {})
-        systemic = input_params.get('systemic')
-        systemic_routes = {'IV', 'PO', 'IM'}
-        
-        antibiotics_to_remove = {
-            'first_choice': [],
-            'second_choice': [],
-            'alternative_antibiotic': []
-        }
-        
-        for source_result in updated_source_results:
-            therapy_plan = source_result.get('antibiotic_therapy_plan', {})
-            
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
-                antibiotics = therapy_plan.get(category, [])
-                if not isinstance(antibiotics, list):
-                    continue
-                
-                for idx, ab_entry in enumerate(antibiotics):
-                    if not isinstance(ab_entry, dict):
-                        continue
-                    
-                    route = ab_entry.get('route_of_administration')
-                    if route is None:
-                        route = ''
-                    else:
-                        route = str(route).strip()
-                    
-                    medical_name = ab_entry.get('medical_name', 'unknown')
-                    
-                    # Always filter out null/empty routes
-                    if not route:
-                        logger.warning(f"  [Route Filter] Filtered out {medical_name}: route is null/empty")
-                        antibiotics_to_remove[category].append((source_result, idx))
-                        continue
-                    
-                    # Filter based on systemic flag (only if systemic is not None)
-                    if systemic is not None:
-                        # Check if route is one of the systemic routes (IV, PO, IM)
-                        route_upper = route.upper()
-                        route_is_systemic = route_upper in systemic_routes
-                        
-                        if systemic is True:
-                            # Only keep routes that are IV, PO, or IM
-                            if not route_is_systemic:
-                                logger.warning(f"  [Route Filter] Filtered out {medical_name}: route '{route}' is not IV, PO, or IM (systemic=True)")
-                                antibiotics_to_remove[category].append((source_result, idx))
-                        elif systemic is False:
-                            # Exclude routes that are IV, PO, or IM
-                            if route_is_systemic:
-                                logger.warning(f"  [Route Filter] Filtered out {medical_name}: route '{route}' is IV, PO, or IM (systemic=False)")
-                                antibiotics_to_remove[category].append((source_result, idx))
-                        # If systemic is None, only null routes are filtered (already handled above)
-            
-            # Remove filtered antibiotics from source results
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
-                if antibiotics_to_remove[category]:
-                    # Group by source_result
-                    source_to_indices = {}
-                    for source_result, idx in antibiotics_to_remove[category]:
-                        source_id = id(source_result)
-                        if source_id not in source_to_indices:
-                            source_to_indices[source_id] = (source_result, [])
-                        source_to_indices[source_id][1].append(idx)
-                    
-                    # Remove from each source in reverse order
-                    for source_result, indices in source_to_indices.values():
-                        therapy_plan = source_result.get('antibiotic_therapy_plan', {})
-                        antibiotics = therapy_plan.get(category, [])
-                        if isinstance(antibiotics, list):
-                            for idx in sorted(set(indices), reverse=True):
-                                if 0 <= idx < len(antibiotics):
-                                    removed_ab = antibiotics.pop(idx)
-                                    ab_name = removed_ab.get('medical_name', 'unknown') if isinstance(removed_ab, dict) else 'unknown'
-                                    logger.info(f"  [Route Filter] Removed {ab_name} from {category} (route does not match systemic={systemic})")
-        
         # Emit progress for ranking complete
         if progress_callback:
             progress_callback('rank', 100, 'Ranking complete')
@@ -386,7 +412,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'second_choice': set(),
             'alternative_antibiotic': set()
         }
-        final_categories = {}
+        final_categories_for_logging = {}
         
         for source_result in updated_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
@@ -399,14 +425,14 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             if medical_name:
                                 normalized_name = normalize_antibiotic_name(medical_name)
                                 category_antibiotics[category].add(normalized_name)
-                                final_categories[normalized_name] = category
+                                final_categories_for_logging[normalized_name] = category
         
         # Count unique antibiotics per category
         for category, antibiotics_set in category_antibiotics.items():
             category_counts[category] = len(antibiotics_set)
         
         # Log assignments for all antibiotics
-        for normalized_name, final_category in final_categories.items():
+        for normalized_name, final_category in final_categories_for_logging.items():
             # Get occurrence counts
             group_data = antibiotic_groups.get(normalized_name, {})
             original_cats = antibiotic_original_categories.get(normalized_name, {})
@@ -424,8 +450,22 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             count_str = f"({', '.join(counts)})" if counts else "(0)"
             total_occurrences = sum(original_cats.values())
             
-            # Determine original category (most common occurrence)
-            max_original = max(original_cats.items(), key=lambda x: x[1]) if original_cats else None
+            # Determine original category (most common occurrence) with deterministic tie-breaking
+            if original_cats:
+                # Use deterministic max with category priority
+                category_priority = {
+                    'first_choice': 3,
+                    'second_choice': 2,
+                    'alternative_antibiotic': 1
+                }
+                sorted_cats = sorted(
+                    original_cats.items(),
+                    key=lambda x: (x[1], category_priority.get(x[0], 0)),
+                    reverse=True
+                )
+                max_original = sorted_cats[0] if sorted_cats else None
+            else:
+                max_original = None
             
             if max_original and max_original[1] > 0:
                 original_category = max_original[0]
@@ -449,7 +489,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 })
         
         logger.info(
-            f"Ranked {len(final_categories)} antibiotics: "
+            f"Ranked {len(final_categories_for_logging)} antibiotics: "
             f"{category_counts['first_choice']} first_choice, "
             f"{category_counts['second_choice']} second_choice, "
             f"{category_counts['alternative_antibiotic']} alternative"

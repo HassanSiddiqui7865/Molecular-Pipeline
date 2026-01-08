@@ -4,7 +4,7 @@ Uses LlamaIndex Pydantic program for structured extraction.
 """
 import json
 import logging
-import uuid
+import hashlib
 import copy
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -196,56 +196,76 @@ def _extract_with_llamaindex(
                 # Store this chunk's text for overlap context in next chunk
                 previous_chunk_text = chunk
                 
-                # CRITICAL: Merge results into all_antibiotics/all_resistance_genes BEFORE processing next chunk.
+                # Merge results into all_antibiotics/all_resistance_genes BEFORE processing next chunk.
                 # This ensures chunk 2 can see and enhance chunk 1's extractions.
-                # Merge antibiotics intelligently - allow enhancement of existing entries
+                # Merge across ALL categories first, then organize by category
+                # This prevents duplicates when same antibiotic appears in different categories
                 therapy_plan = chunk_result.get('antibiotic_therapy_plan', {})
+                
+                # Collect all new antibiotics from all categories
+                all_new_antibiotics = []
                 for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                     antibiotics = therapy_plan.get(category, [])
                     if isinstance(antibiotics, list):
-                        for new_ab in antibiotics:
-                            if not isinstance(new_ab, dict):
-                                continue
-                            
-                            new_name = new_ab.get('medical_name', '').strip()
-                            new_route = new_ab.get('route_of_administration', '').strip() if new_ab.get('route_of_administration') else ''
-                            
-                            if not new_name:
-                                continue
-                            
-                            # Check if we already have this antibiotic (same name and route)
-                            existing_ab = None
-                            for existing in all_antibiotics[category]:
-                                if isinstance(existing, dict):
-                                    existing_name = existing.get('medical_name', '').strip()
-                                    existing_route = existing.get('route_of_administration', '').strip() if existing.get('route_of_administration') else ''
-                                    if existing_name == new_name and existing_route == new_route:
-                                        existing_ab = existing
-                                        break
-                            
-                            if existing_ab:
-                                # Enhance existing entry with new information
-                                # Replace null fields with new values, merge non-null fields
-                                
-                                if not existing_ab.get('dose_duration') and new_ab.get('dose_duration'):
-                                    existing_ab['dose_duration'] = new_ab['dose_duration']
-                                
-                                if not existing_ab.get('renal_adjustment') and new_ab.get('renal_adjustment'):
-                                    existing_ab['renal_adjustment'] = new_ab['renal_adjustment']
-                                
-                                if not existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
-                                    existing_ab['general_considerations'] = new_ab['general_considerations']
-                                elif existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
-                                    existing_cons = existing_ab['general_considerations']
-                                    new_cons = new_ab['general_considerations']
-                                    if new_cons not in existing_cons and len(existing_cons + '; ' + new_cons) <= 300:
-                                        existing_ab['general_considerations'] = f"{existing_cons}; {new_cons}"
-                                
-                                if not existing_ab.get('coverage_for') and new_ab.get('coverage_for'):
-                                    existing_ab['coverage_for'] = new_ab['coverage_for']
-                            else:
-                                # New antibiotic, add it
-                                all_antibiotics[category].append(new_ab)
+                        for ab in antibiotics:
+                            if isinstance(ab, dict) and ab.get('medical_name'):
+                                all_new_antibiotics.append((ab, category))
+                
+                # Now merge each new antibiotic with existing ones (checking ALL categories)
+                for new_ab, new_category in all_new_antibiotics:
+                    if not isinstance(new_ab, dict):
+                        continue
+                    
+                    new_name = new_ab.get('medical_name', '').strip()
+                    new_route = new_ab.get('route_of_administration', '').strip() if new_ab.get('route_of_administration') else ''
+                    
+                    if not new_name:
+                        continue
+                    
+                    # Check if we already have this antibiotic (same name and route) in ANY category
+                    existing_ab = None
+                    existing_category = None
+                    for cat in ['first_choice', 'second_choice', 'alternative_antibiotic']:
+                        for existing in all_antibiotics[cat]:
+                            if isinstance(existing, dict):
+                                existing_name = existing.get('medical_name', '').strip()
+                                existing_route = existing.get('route_of_administration', '').strip() if existing.get('route_of_administration') else ''
+                                if existing_name == new_name and existing_route == new_route:
+                                    existing_ab = existing
+                                    existing_category = cat
+                                    break
+                        if existing_ab:
+                            break
+                    
+                    if existing_ab:
+                        # Enhance existing entry with new information
+                        # Replace null fields with new values, merge non-null fields
+                        
+                        if not existing_ab.get('dose_duration') and new_ab.get('dose_duration'):
+                            existing_ab['dose_duration'] = new_ab['dose_duration']
+                        
+                        if not existing_ab.get('renal_adjustment') and new_ab.get('renal_adjustment'):
+                            existing_ab['renal_adjustment'] = new_ab['renal_adjustment']
+                        
+                        if not existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
+                            existing_ab['general_considerations'] = new_ab['general_considerations']
+                        elif existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
+                            existing_cons = existing_ab['general_considerations']
+                            new_cons = new_ab['general_considerations']
+                            if new_cons not in existing_cons and len(existing_cons + '; ' + new_cons) <= 300:
+                                existing_ab['general_considerations'] = f"{existing_cons}; {new_cons}"
+                        
+                        if not existing_ab.get('coverage_for') and new_ab.get('coverage_for'):
+                            existing_ab['coverage_for'] = new_ab['coverage_for']
+                        
+                        # If new category is higher priority, move to that category
+                        category_priority = {'first_choice': 3, 'second_choice': 2, 'alternative_antibiotic': 1}
+                        if category_priority.get(new_category, 0) > category_priority.get(existing_category, 0):
+                            all_antibiotics[existing_category].remove(existing_ab)
+                            all_antibiotics[new_category].append(existing_ab)
+                    else:
+                        # New antibiotic, add it to the appropriate category
+                        all_antibiotics[new_category].append(new_ab)
                 
                 # Merge resistance genes - avoid duplicates
                 resistance_genes = chunk_result.get('pharmacist_analysis_on_resistant_gene', [])
@@ -379,11 +399,13 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
             result = SearchResult(**result_data)
             logger.info(f"[{idx}/{len(search_results)}] Processing: {result.title[:50]}...")
             
-            # Add unique ID to prevent caching
+            # Use deterministic ID based on source content (hash of title + snippet)
+            # This ensures consistent extraction while still preventing caching issues
+            content_hash = hashlib.md5(f"{result.title}|{result.snippet}".encode('utf-8')).hexdigest()[:8]
             source_content = (
                 f"Title: {result.title}\n"
                 f"Content: {result.snippet}\n"
-                f"[ID: {uuid.uuid4()}]"
+                f"[ID: {content_hash}]"
             )
             
             # Extract with retry logic
