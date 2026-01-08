@@ -16,7 +16,7 @@ CRITICAL CONSTRAINT: Extract ONLY antibiotics relevant to {pathogen_display}{res
 FIELDS:
 
 medical_name
-Extract the base drug name in Title Case. Remove formulations such as Gel, Cream, Ointment, Solution, Suspension, Tablet, Capsule, Injection, Patch, Syrup. For combination drugs, convert slashes, hyphens, or the word "and" into "plus". Examples: TMP/SMX becomes Trimethoprim plus Sulfamethoxazole. Imipenem/cilastatin becomes Imipenem plus Cilastatin. Never extract resistance genes as antibiotics. Never extract drug classes without a specific drug name.
+Extract the base drug name in Title Case. Remove all formulation details including: Liposomal, Conventional, Standard, Generic, Gel, Cream, Ointment, Solution, Suspension, Tablet, Capsule, Injection, Patch, Syrup, and any other formulation descriptors. For combination drugs, convert slashes, hyphens, or the word "and" into "plus". Examples: "Liposomal amphotericin B" becomes "Amphotericin B". "TMP/SMX" becomes "Trimethoprim plus Sulfamethoxazole". "Imipenem/cilastatin" becomes "Imipenem plus Cilastatin". Never extract resistance genes as antibiotics. Never extract drug classes without a specific drug name.
 
 category
 Default category is first_choice.
@@ -36,10 +36,10 @@ dose_duration
 Extract complete dosage including dose amount in mg or mg/kg for systemic routes, or percentage concentration and formulation for non-systemic routes, plus route, frequency, and duration. Systemic format is dose route frequency for duration, or Loading dose route, then dose route frequency for duration. Non-systemic format must preserve percentage and formulation exactly, for example 0.75% gel 5 g Vaginal q24h for 5 days. Normalize frequencies strictly as follows. BID or twice daily becomes q12h. TID or three times daily becomes q8h. QD, daily, or once daily becomes q24h. Preserve ranges exactly as written. If multiple complete dosages exist, prioritize shorter duration. Set dose_duration to null if dose, frequency, or duration is missing. Do NOT extract partial dosage. Do NOT invent missing information. Do NOT include the drug name in dose_duration.
 
 renal_adjustment
-Extract only what is explicitly stated. For systemic routes, use No Renal Adjustment only if explicitly stated, or Adjust dose for CrCl less than X mL/min if specified, choosing the most restrictive threshold if multiple are mentioned. For non-systemic routes, use No Renal Adjustment only if explicitly stated, otherwise use null. Do not invent defaults. Do not duplicate general_considerations.
+Extract renal dosing adjustment information using standardized format only. For systemic routes: use "No Renal Adjustment" if explicitly stated that no adjustment is needed, or use "Adjust dose for CrCl < X mL/min" format if a specific creatinine clearance threshold is mentioned (use the most restrictive threshold if multiple are mentioned). For non-systemic routes: use "No Renal Adjustment" only if explicitly stated, otherwise use null. Standardize all variations: "No adjustment recommended", "No adjustment needed", "CrCl 50 mL/min or less" → convert to standard format. If information states "data not available" or similar, use null. Do not invent defaults. Keep detailed renal adjustment explanations in general_considerations field, but use only the standardized value here.
 
 general_considerations
-Extract monitoring requirements, warnings, toxicity, interactions, contraindications, or clinically relevant precautions. Separate multiple points with semicolons. Exclude dosing instructions, drug class descriptions, resistance mechanisms, or efficacy statements. Use null if no information exists.
+Extract monitoring requirements, warnings, toxicity, interactions, contraindications, special population considerations, and clinically relevant precautions. Include detailed renal adjustment information here (e.g., specific CrCl thresholds, monitoring requirements, dialysis considerations) even though the standardized value appears in renal_adjustment field. Keep concise: maximum 200 characters, 2-3 key points separated by semicolons. Prioritize the most critical clinical considerations. Exclude dosing instructions, drug class descriptions, resistance mechanisms, or efficacy statements. Use null if no information exists.
 
 {resistance_genes_section}{allergy_filtering_rule}
 
@@ -82,7 +82,7 @@ SOURCE PRIORITY (use highest priority source available):
 
 UNIFICATION RULES:
 
-medical_name: Use only names from entries. Remove formulations (Gel, Cream, Ointment, Solution, Suspension, Tablet, Capsule, Injection, etc.). Use most standard/complete form. Title Case. For combinations, use lowercase "plus" (e.g., "Trimethoprim plus Sulfamethoxazole"). Keep "Drug1 plus Drug2" format. Do not invent names.
+medical_name: Use only names from entries. Remove all formulation details including: Liposomal, Conventional, Standard, Generic, Gel, Cream, Ointment, Solution, Suspension, Tablet, Capsule, Injection, Patch, Syrup, and any other formulation descriptors. Use the most standard base drug name. Title Case. For combinations, use lowercase "plus" (e.g., "Trimethoprim plus Sulfamethoxazole"). Keep "Drug1 plus Drug2" format. Examples: "Liposomal amphotericin B" → "Amphotericin B". Do not invent names.
 
 coverage_for: Extract pathogen names only from entries. If multiple pathogens are mentioned, combine them comma-separated. Prioritize guideline sources first. Use only pathogen names from entries. Do not invent.
 
@@ -90,9 +90,9 @@ route_of_administration: Must match the fixed route ({route_of_administration}).
 
 dose_duration: Use only complete dosages from entries. Complete means dose + frequency + duration. Format: "[dose] [route] [frequency] for [duration]" or "Loading: [dose] [route], then [dose] [route] [frequency] for [duration]". Route in dose_duration must match {route_of_administration}. Preserve ranges ("15-20 mg/kg", "7-14 days"). Incomplete dosages → NULL. Select the best dosage based on source priority and completeness. Only ONE dosage per route.
 
-renal_adjustment: Use only from entries. Prioritize guideline sources. Systemic: "No Renal Adjustment" or "Adjust dose for CrCl < X mL/min" if explicitly stated. Non-systemic: null if not mentioned. Do not invent. Avoid duplicating info in general_considerations.
+renal_adjustment: Use only standardized format from entries. Prioritize guideline sources. For systemic routes: use "No Renal Adjustment" if explicitly stated, or "Adjust dose for CrCl < X mL/min" format if a threshold is mentioned (use most restrictive if multiple). For non-systemic routes: use "No Renal Adjustment" only if explicitly stated, otherwise null. Standardize all variations to these formats. Keep detailed renal adjustment explanations (specific thresholds, monitoring, dialysis info) in general_considerations field, but use only the standardized value here. Do not invent.
 
-general_considerations: Combine distinct notes from all entries. Remove duplicates/near-duplicates. Keep concise (2-3 points). Prioritize guideline sources. Include monitoring, warnings, interactions, side effects, contraindications, special population considerations. Exclude dosing info and renal_adjustment thresholds. Null if no info.
+general_considerations: Combine distinct notes from all entries. Remove duplicates/near-duplicates. Keep concise: maximum 200 characters, 2-3 key points separated by semicolons. Prioritize guideline sources. Include monitoring, warnings, interactions, side effects, contraindications, special population considerations, and detailed renal adjustment information (specific CrCl thresholds, monitoring requirements, dialysis considerations). The standardized renal adjustment value appears in renal_adjustment field, but detailed explanations belong here. Exclude dosing instructions. Null if no info.
 
 is_combined: True if any source has is_combined=True or medical_name contains "plus" (case-insensitive). False only if all sources indicate not combined.
 
@@ -102,8 +102,8 @@ VALIDATION:
 - medical_name: Title Case with lowercase "plus" for combinations.  
 - route_of_administration: Must exactly match {route_of_administration}.  
 - dose_duration: Complete if dose, frequency, and duration are present; otherwise NULL. Route must match route_of_administration.  
-- renal_adjustment: "Adjust dose for CrCl < X mL/min" or "No Renal Adjustment" if explicitly stated; null if not found.  
-- general_considerations: No duplication of renal_adjustment info; null if no notes.  
+- renal_adjustment: Standardized format only: "No Renal Adjustment" or "Adjust dose for CrCl < X mL/min". Detailed renal info belongs in general_considerations.
+- general_considerations: Maximum 200 characters, 2-3 key points. Includes detailed renal adjustment explanations. Null if no notes.
 - is_combined and is_complete flags reflect source information only.  
 
 OUTPUT: ONE unified entry with the most accurate, complete info. All formats must match requirements."""
@@ -180,9 +180,9 @@ route_of_administration: Extract only if missing in existing_data. Preserve exis
 
 coverage_for: Extract pathogen names only. If multiple pathogens apply, list them comma-separated (e.g., "MRSA", "VRE", "MRSA, E. coli"). Match patient context (ICD: {icd_codes}{gene_context}). Null if no info.
 
-renal_adjustment: Extract only if explicitly mentioned. For systemic: "No Renal Adjustment" or "Adjust dose for CrCl < X mL/min" (most restrictive if multiple). Non-systemic: "No Renal Adjustment" if stated; otherwise null. Do not invent. Do not duplicate general_considerations.
+renal_adjustment: Extract using standardized format only. For systemic routes: use "No Renal Adjustment" if explicitly stated, or "Adjust dose for CrCl < X mL/min" format if a threshold is mentioned (use most restrictive if multiple). For non-systemic routes: use "No Renal Adjustment" only if explicitly stated, otherwise null. Standardize all variations to these formats. Keep detailed renal adjustment information (specific thresholds, monitoring, dialysis) in general_considerations field, but use only the standardized value here. Do not invent.
 
-general_considerations: Extract monitoring, warnings, toxicity, interactions, contraindications. Separate with semicolons. Exclude dosing or drug class descriptions. Null if no info. Do not invent.
+general_considerations: Extract monitoring, warnings, toxicity, interactions, contraindications, special population considerations, and detailed renal adjustment information (specific CrCl thresholds, monitoring requirements, dialysis considerations). Keep concise: maximum 200 characters, 2-3 key points separated by semicolons. The standardized renal adjustment value appears in renal_adjustment field, but detailed explanations belong here. Exclude dosing instructions or drug class descriptions. Null if no info. Do not invent.
 
 CRITICAL RULES:
 - Extract ONLY fields in missing_fields; preserve others.  
