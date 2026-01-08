@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     build-essential \
     pkg-config \
+    git \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
