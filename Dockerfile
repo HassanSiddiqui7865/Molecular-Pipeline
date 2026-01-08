@@ -82,6 +82,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install toon-python from GitHub
+RUN pip install --no-cache-dir git+https://github.com/toon-format/toon-python.git
+
 # Download NLTK data
 RUN python -c "import nltk; nltk.download('punkt', quiet=True)"
 
