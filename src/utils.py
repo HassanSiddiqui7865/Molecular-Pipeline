@@ -377,6 +377,7 @@ def log_llm_input(prompt: str, operation_name: str = "LLM Call", metadata: Optio
     """
     Log LLM input prompt to file for debugging and auditing.
     Centralized logging function for all LLM inputs.
+    Only saves logs in development mode (when save_enabled is True).
     
     Args:
         prompt: The prompt text sent to the LLM
@@ -385,6 +386,16 @@ def log_llm_input(prompt: str, operation_name: str = "LLM Call", metadata: Optio
     """
     if not _llm_log_enabled:
         return
+    
+    # Check if saving is enabled (development mode)
+    try:
+        from config import get_output_config
+        output_config = get_output_config()
+        if not output_config.get('save_enabled', True):
+            return
+    except Exception:
+        # If config check fails, allow logging (fallback)
+        pass
     
     try:
         log_file = _get_llm_log_file()
