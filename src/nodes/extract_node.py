@@ -5,6 +5,7 @@ Uses LlamaIndex Pydantic program for structured extraction.
 import json
 import logging
 import uuid
+import copy
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +14,8 @@ from schemas import SearchResult, CombinedExtractionResult
 from prompts import EXTRACTION_PROMPT_TEMPLATE
 from utils import (format_resistance_genes, get_icd_names_from_state, 
                    get_pathogens_from_input, format_pathogens, 
-                   get_resistance_genes_from_input, create_llm, retry_with_max_attempts, RetryError)
+                   get_resistance_genes_from_input, create_llm, retry_with_max_attempts, RetryError,
+                   chunk_text_with_llamaindex, convert_json_to_toon, call_llm_program)
 
 logger = logging.getLogger(__name__)
 
@@ -81,61 +83,219 @@ def _extract_with_llamaindex(
         allergy_context = ""
         allergy_filtering_rule = ""
     
-    # Format prompt
-    prompt = EXTRACTION_PROMPT_TEMPLATE.format(
-        pathogen_display=pathogen_name,
-        resistance_context=resistance_context,
-        resistance_task=resistance_task,
-        allergy_context=allergy_context,
-        severity_codes=severity_codes,
-        age=f"{age} years" if age else 'Not specified',
-        panel=panel or 'Not specified',
-        content=content,
-        resistance_genes_section=resistance_genes_section,
-        resistance_filtering_rule=resistance_filtering_rule,
-        allergy_filtering_rule=allergy_filtering_rule
+    # Chunk the content for processing based on tokens (GPT-OSS 20B: ~4k-8k tokens typical)
+    chunk_size_tokens = 2500  # Target 2.5k tokens per chunk for extraction
+    chunk_overlap_tokens = 200  # 200 tokens overlap for context
+    chunks = chunk_text_with_llamaindex(content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
+    
+    from utils import _get_token_count
+    total_tokens = _get_token_count(content)
+    logger.info(f"Processing {len(chunks)} chunks for extraction from '{source_title[:50]}...' (total: {total_tokens} tokens, {len(content)} chars)")
+    
+    # Accumulate results from all chunks
+    all_antibiotics = {
+        'first_choice': [],
+        'second_choice': [],
+        'alternative_antibiotic': []
+    }
+    all_resistance_genes = []
+    
+    # Track previous chunks' extracted data for cross-chunk context
+    previous_chunks_extracted = []
+    
+    # Each chunk depends on previous chunks' extractions being merged into all_antibiotics/all_resistance_genes.
+    # Chunk 1's results are merged before chunk 2 is processed, so chunk 2 can see and enhance chunk 1's data.
+    for i, chunk in enumerate(chunks):
+        def _process_chunk():
+            # Build cross-chunk context from merged data (more accurate than raw chunks)
+            # Only show context if we actually have extracted data (not for first chunk)
+            cross_chunk_context = ""
+            has_extracted_data = (
+                all_antibiotics.get('first_choice') or 
+                all_antibiotics.get('second_choice') or 
+                all_antibiotics.get('alternative_antibiotic') or 
+                all_resistance_genes
+            )
+            
+            if has_extracted_data:
+                # Build from merged data (already deduplicated and enhanced)
+                merged_extraction = {
+                    'antibiotic_therapy_plan': {
+                        'first_choice': copy.deepcopy(all_antibiotics['first_choice']),
+                        'second_choice': copy.deepcopy(all_antibiotics['second_choice']),
+                        'alternative_antibiotic': copy.deepcopy(all_antibiotics['alternative_antibiotic'])
+                    },
+                    'pharmacist_analysis_on_resistant_gene': copy.deepcopy(all_resistance_genes)
+                }
+                
+                # Convert merged extraction to TOON format (raises exception if TOON not available)
+                toon_format = convert_json_to_toon(merged_extraction)
+                
+                cross_chunk_context = f"\n\n--- WHAT WE HAVE EXTRACTED SO FAR (from previous chunks) ---\n\n```toon\n{toon_format}\n```\n\n"
+                cross_chunk_context += "INSTRUCTIONS: You can ADD NEW antibiotics or resistance genes from this chunk, or COMPLETE/ENHANCE existing ones if you find more information (e.g., missing dose_duration, renal_adjustment, or general_considerations). Do NOT duplicate antibiotics that are already listed above unless you have significantly different or more complete information.\n\n"
+            
+            # Format chunk info
+            chunk_info = f" (chunk {i+1} of {len(chunks)})" if len(chunks) > 1 else ""
+            
+            # Format prompt with chunk and cross-chunk context
+            prompt = EXTRACTION_PROMPT_TEMPLATE.format(
+                pathogen_display=pathogen_name,
+                resistance_context=resistance_context,
+                resistance_task=resistance_task,
+                allergy_context=allergy_context,
+                severity_codes=severity_codes,
+                age=f"{age} years" if age else 'Not specified',
+                panel=panel or 'Not specified',
+                content=chunk,
+                chunk_info=chunk_info,
+                cross_chunk_context=cross_chunk_context,
+                resistance_genes_section=resistance_genes_section,
+                resistance_filtering_rule=resistance_filtering_rule,
+                allergy_filtering_rule=allergy_filtering_rule
+            )
+            
+            program = LLMTextCompletionProgram.from_defaults(
+                output_cls=CombinedExtractionResult,
+                llm=llm,
+                prompt_template_str="{input_str}",
+                verbose=False
+            )
+            
+            # Use logging wrapper for LLM call
+            metadata = {
+                'chunk_number': i + 1,
+                'total_chunks': len(chunks),
+                'source_title': source_title[:100] if source_title else '',
+                'operation': 'extraction'
+            }
+            result = call_llm_program(program, prompt, operation_name=f"Extraction chunk {i+1}/{len(chunks)}", metadata=metadata)
+            
+            if not result:
+                return None
+            result_dict = result.model_dump()
+            return result_dict
+        
+        try:
+            logger.debug(f"Processing chunk {i+1}/{len(chunks)} SEQUENTIALLY for '{source_title[:50]}...'")
+            # Process chunk synchronously - wait for completion before moving to next chunk
+            chunk_result = retry_with_max_attempts(
+                operation=_process_chunk,
+                operation_name=f"LLM extraction from chunk {i+1} of {source_title}",
+                max_attempts=5,
+                retry_delay=retry_delay,
+                should_retry_on_empty=True
+            )
+            
+            if chunk_result:
+                # Store this chunk's results for cross-chunk context (use deepcopy to avoid reference issues)
+                previous_chunks_extracted.append(copy.deepcopy(chunk_result))
+                
+                # CRITICAL: Merge results into all_antibiotics/all_resistance_genes BEFORE processing next chunk.
+                # This ensures chunk 2 can see and enhance chunk 1's extractions.
+                # Merge antibiotics intelligently - allow enhancement of existing entries
+                therapy_plan = chunk_result.get('antibiotic_therapy_plan', {})
+                for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
+                    antibiotics = therapy_plan.get(category, [])
+                    if isinstance(antibiotics, list):
+                        for new_ab in antibiotics:
+                            if not isinstance(new_ab, dict):
+                                continue
+                            
+                            new_name = new_ab.get('medical_name', '').strip()
+                            new_route = new_ab.get('route_of_administration', '').strip() if new_ab.get('route_of_administration') else ''
+                            
+                            if not new_name:
+                                continue
+                            
+                            # Check if we already have this antibiotic (same name and route)
+                            existing_ab = None
+                            for existing in all_antibiotics[category]:
+                                if isinstance(existing, dict):
+                                    existing_name = existing.get('medical_name', '').strip()
+                                    existing_route = existing.get('route_of_administration', '').strip() if existing.get('route_of_administration') else ''
+                                    if existing_name == new_name and existing_route == new_route:
+                                        existing_ab = existing
+                                        break
+                            
+                            if existing_ab:
+                                # Enhance existing entry with new information
+                                # Only update if new info is more complete
+                                if not existing_ab.get('dose_duration') and new_ab.get('dose_duration'):
+                                    existing_ab['dose_duration'] = new_ab['dose_duration']
+                                if not existing_ab.get('renal_adjustment') and new_ab.get('renal_adjustment'):
+                                    existing_ab['renal_adjustment'] = new_ab['renal_adjustment']
+                                if not existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
+                                    existing_ab['general_considerations'] = new_ab['general_considerations']
+                                elif existing_ab.get('general_considerations') and new_ab.get('general_considerations'):
+                                    # Merge considerations if both exist
+                                    existing_cons = existing_ab['general_considerations']
+                                    new_cons = new_ab['general_considerations']
+                                    if new_cons not in existing_cons and len(existing_cons + '; ' + new_cons) <= 300:
+                                        existing_ab['general_considerations'] = f"{existing_cons}; {new_cons}"
+                                if not existing_ab.get('coverage_for') and new_ab.get('coverage_for'):
+                                    existing_ab['coverage_for'] = new_ab['coverage_for']
+                            else:
+                                # New antibiotic, add it
+                                all_antibiotics[category].append(new_ab)
+                
+                # Merge resistance genes - avoid duplicates
+                resistance_genes = chunk_result.get('pharmacist_analysis_on_resistant_gene', [])
+                if isinstance(resistance_genes, list):
+                    for new_gene in resistance_genes:
+                        if not isinstance(new_gene, dict):
+                            continue
+                        
+                        new_gene_name = new_gene.get('detected_resistant_gene_name', '').strip()
+                        if not new_gene_name:
+                            continue
+                        
+                        # Check if we already have this gene
+                        existing_gene = next(
+                            (g for g in all_resistance_genes 
+                             if isinstance(g, dict) and g.get('detected_resistant_gene_name', '').strip() == new_gene_name),
+                            None
+                        )
+                        
+                        if existing_gene:
+                            # Enhance existing gene with new information
+                            if not existing_gene.get('potential_medication_class_affected') and new_gene.get('potential_medication_class_affected'):
+                                existing_gene['potential_medication_class_affected'] = new_gene['potential_medication_class_affected']
+                            if not existing_gene.get('general_considerations') and new_gene.get('general_considerations'):
+                                existing_gene['general_considerations'] = new_gene['general_considerations']
+                            elif existing_gene.get('general_considerations') and new_gene.get('general_considerations'):
+                                # Merge considerations
+                                existing_cons = existing_gene['general_considerations']
+                                new_cons = new_gene['general_considerations']
+                                if new_cons not in existing_cons and len(existing_cons + '; ' + new_cons) <= 200:
+                                    existing_gene['general_considerations'] = f"{existing_cons}; {new_cons}"
+                        else:
+                            # New gene, add it
+                            all_resistance_genes.append(new_gene)
+        
+        except RetryError as e:
+            logger.warning(f"Chunk {i+1} extraction failed for {source_title}: {e}, continuing with other chunks")
+            continue
+    
+    # Merge results from all chunks
+    result_dict = {
+        'antibiotic_therapy_plan': all_antibiotics,
+        'pharmacist_analysis_on_resistant_gene': all_resistance_genes
+    }
+    
+    # Post-process to fix is_combined, route extraction, and frequency conversion
+    result_dict = _post_process_extraction_result(result_dict)
+    
+    # Log summary
+    therapy = result_dict.get('antibiotic_therapy_plan', {})
+    logger.info(
+        f"Extracted from '{source_title[:50]}...' ({len(chunks)} chunks): "
+        f"first={len(therapy.get('first_choice', []))}, "
+        f"second={len(therapy.get('second_choice', []))}, "
+        f"alt={len(therapy.get('alternative_antibiotic', []))}, "
+        f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
     )
     
-    def _perform_extraction():
-        program = LLMTextCompletionProgram.from_defaults(
-            output_cls=CombinedExtractionResult,
-            llm=llm,
-            prompt_template_str="{input_str}",
-            verbose=False
-        )
-        result = program(input_str=prompt)
-        if not result:
-            return None
-        result_dict = result.model_dump()
-        return result_dict
-    
-    try:
-        result_dict = retry_with_max_attempts(
-            operation=_perform_extraction,
-            operation_name=f"LLM extraction from {source_title}",
-            max_attempts=5,
-            retry_delay=retry_delay,
-            should_retry_on_empty=True
-        )
-        
-        # Post-process to fix is_combined, route extraction, and frequency conversion
-        result_dict = _post_process_extraction_result(result_dict)
-        
-        # Log summary
-        therapy = result_dict.get('antibiotic_therapy_plan', {})
-        logger.info(
-            f"Extracted from '{source_title[:50]}...': "
-            f"first={len(therapy.get('first_choice', []))}, "
-            f"second={len(therapy.get('second_choice', []))}, "
-            f"alt={len(therapy.get('alternative_antibiotic', []))}, "
-            f"genes={len(result_dict.get('pharmacist_analysis_on_resistant_gene', []))}"
-        )
-        
-        return result_dict
-        
-    except RetryError as e:
-        logger.error(f"Extraction failed after max attempts for {source_title}: {e}")
-        raise
+    return result_dict
 
 
 def _empty_result() -> Dict[str, Any]:
@@ -144,8 +304,7 @@ def _empty_result() -> Dict[str, Any]:
         'antibiotic_therapy_plan': {
             'first_choice': [],
             'second_choice': [],
-            'alternative_antibiotic': [],
-            'not_known': []
+            'alternative_antibiotic': []
         },
         'pharmacist_analysis_on_resistant_gene': []
     }
@@ -157,7 +316,7 @@ def _post_process_extraction_result(result_dict: Dict[str, Any]) -> Dict[str, An
     """
     therapy_plan = result_dict.get('antibiotic_therapy_plan', {})
     
-    for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+    for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
         antibiotics = therapy_plan.get(category, [])
         if not isinstance(antibiotics, list):
             continue
@@ -275,14 +434,24 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if 'errors' not in state:
                         state['errors'] = []
                     state['errors'].append(error_msg)
+                    # Get search result data for this index
+                    result_data = search_results[idx - 1]
+                    result = SearchResult(**result_data) if isinstance(result_data, dict) else result_data
                     # Return empty result for this source instead of stopping entire pipeline
-                    return {
+                    results_dict[idx] = {
                         'source_url': result.url,
                         'source_title': result.title,
                         'source_index': idx,
                         'antibiotic_therapy_plan': {},
                         'pharmacist_analysis_on_resistant_gene': []
                     }
+                    completed_count += 1
+                    
+                    # Emit progress even on error
+                    if progress_callback:
+                        sub_progress = (completed_count / total_sources) * 100.0
+                        progress_callback('extract', sub_progress, f'Processed {completed_count}/{total_sources} sources (error on {idx})')
+                    continue
                 except Exception as e:
                     logger.error(f"[{idx}] Processing error: {e}", exc_info=True)
                     completed_count += 1
@@ -292,10 +461,13 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         sub_progress = (completed_count / total_sources) * 100.0
                         progress_callback('extract', sub_progress, f'Processed {completed_count}/{total_sources} sources (error on {idx})')
                     
+                    # Get search result data for this index
+                    result_data = search_results[idx - 1]
+                    result = SearchResult(**result_data) if isinstance(result_data, dict) else result_data
                     # Store empty result on error
                     results_dict[idx] = {
-                        'source_url': search_results[idx-1].get('url', ''),
-                        'source_title': search_results[idx-1].get('title', ''),
+                        'source_url': result.url,
+                        'source_title': result.title,
                         'source_index': idx,
                         **_empty_result()
                     }

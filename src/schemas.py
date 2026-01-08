@@ -21,7 +21,6 @@ class AntibioticTherapyPlan(BaseModel):
     first_choice: List[AntibioticEntry] = Field(default_factory=list)
     second_choice: List[AntibioticEntry] = Field(default_factory=list)
     alternative_antibiotic: List[AntibioticEntry] = Field(default_factory=list)
-    not_known: List[AntibioticEntry] = Field(default_factory=list)
 
 
 class ResistanceGeneEntry(BaseModel):

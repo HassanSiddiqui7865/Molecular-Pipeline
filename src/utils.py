@@ -3,9 +3,35 @@ Utility functions for the Molecular Pipeline.
 """
 import logging
 import time
+import re
+import json
+import copy
+from pathlib import Path
+from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# LLM input logging
+_llm_log_file = None
+_llm_log_enabled = True
+
+# NLTK imports with fallback
+try:
+    import nltk
+    NLTK_AVAILABLE = True
+    # Download punkt tokenizer if not already downloaded
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        logger.info("Downloading NLTK punkt tokenizer...")
+        nltk.download('punkt', quiet=True)
+except ImportError:
+    logger.error("NLTK not available. Install: pip install nltk")
+    NLTK_AVAILABLE = False
+except Exception as e:
+    logger.warning(f"NLTK setup issue: {e}")
+    NLTK_AVAILABLE = False
 
 # LlamaIndex imports with fallback
 try:
@@ -349,6 +375,94 @@ def create_llm() -> Optional[Ollama]:
         return None
 
 
+def _get_llm_log_file() -> Optional[Path]:
+    """Get the LLM log file path, creating directory if needed."""
+    global _llm_log_file
+    if _llm_log_file is None:
+        try:
+            from config import get_output_config
+            output_config = get_output_config()
+            output_dir = Path(output_config.get('directory', 'output'))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            _llm_log_file = output_dir / "llm_inputs.log"
+        except Exception as e:
+            logger.warning(f"Could not determine LLM log file path: {e}")
+            return None
+    return _llm_log_file
+
+
+def log_llm_input(prompt: str, operation_name: str = "LLM Call", metadata: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Log LLM input prompt to file for debugging and auditing.
+    Centralized logging function for all LLM inputs.
+    
+    Args:
+        prompt: The prompt text sent to the LLM
+        operation_name: Name/description of the operation (e.g., "Extraction", "Enrichment")
+        metadata: Optional metadata dictionary (e.g., chunk number, source title)
+    """
+    if not _llm_log_enabled:
+        return
+    
+    try:
+        log_file = _get_llm_log_file()
+        if not log_file:
+            return
+        
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'operation': operation_name,
+            'metadata': metadata or {},
+            'prompt_length': len(prompt),
+            'prompt': prompt
+        }
+        
+        # Read existing logs if file exists
+        existing_logs = []
+        if log_file.exists():
+            try:
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        existing_logs = json.loads(content)
+                        if not isinstance(existing_logs, list):
+                            existing_logs = [existing_logs]
+            except (json.JSONDecodeError, ValueError):
+                # If file is corrupted or not valid JSON, start fresh
+                existing_logs = []
+        
+        # Append new entry
+        existing_logs.append(log_entry)
+        
+        # Write formatted JSON array
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(existing_logs, f, indent=2, ensure_ascii=False)
+    
+    except Exception as e:
+        logger.warning(f"Failed to log LLM input: {e}")
+
+
+def call_llm_program(program: Any, prompt: str, operation_name: str = "LLM Call", metadata: Optional[Dict[str, Any]] = None) -> Any:
+    """
+    Wrapper function to call LLM program with input logging.
+    Use this instead of calling program(input_str=prompt) directly.
+    
+    Args:
+        program: LLMTextCompletionProgram instance
+        prompt: Prompt text to send to LLM
+        operation_name: Name/description of the operation for logging
+        metadata: Optional metadata dictionary (e.g., chunk number, source title)
+        
+    Returns:
+        Result from LLM program
+    """
+    # Log the input before calling
+    log_llm_input(prompt, operation_name, metadata)
+    
+    # Call the LLM
+    return program(input_str=prompt)
+
+
 def normalize_antibiotic_name(name: str) -> str:
     """
     Normalize antibiotic name for comparison (case-insensitive, handle hyphens/dashes).
@@ -471,4 +585,142 @@ def clean_null_strings(data: Any) -> Any:
     else:
         return data
 
+
+def _get_token_count(text: str, encoding_name: str = "cl100k_base") -> int:
+    """
+    Count tokens in text using tiktoken.
+    
+    Args:
+        text: Text to count tokens for
+        encoding_name: Encoding to use (cl100k_base for GPT models)
+        
+    Returns:
+        Number of tokens
+    """
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding(encoding_name)
+        return len(encoding.encode(text))
+    except ImportError:
+        logger.warning("tiktoken not available, using character-based estimation")
+        # Rough estimate: ~4 characters per token
+        return len(text) // 4
+    except Exception as e:
+        logger.warning(f"Error counting tokens: {e}, using character-based estimation")
+        return len(text) // 4
+
+
+def chunk_text_with_llamaindex(text: str, chunk_size_tokens: int = 6000, chunk_overlap_tokens: int = 200) -> List[str]:
+    """
+    Split text into chunks based on token count using LlamaIndex TokenTextSplitter.
+    Uses LlamaIndex's native token splitter for accurate token-based chunking.
+    Shared utility function for both extraction and enrichment nodes.
+    
+    Args:
+        text: Text to chunk
+        chunk_size_tokens: Maximum number of tokens per chunk (default: 6000 for GPT-OSS 20B)
+        chunk_overlap_tokens: Number of tokens to overlap between chunks (default: 200)
+        
+    Returns:
+        List of text chunks
+    """
+    if not text:
+        return []
+    
+    # Count total tokens
+    total_tokens = _get_token_count(text)
+    
+    # If text fits in one chunk, return as-is
+    if total_tokens <= chunk_size_tokens:
+        logger.debug(f"Text fits in single chunk ({total_tokens} tokens)")
+        return [text]
+    
+    # Use LlamaIndex TokenTextSplitter (required, no fallback)
+    if not LLAMAINDEX_AVAILABLE:
+        raise ImportError("LlamaIndex is required for chunking. Install with: pip install llama-index")
+    
+    from llama_index.core.node_parser import TokenTextSplitter
+    from llama_index.core.schema import Document
+    
+    # Create TokenTextSplitter with token-based chunking
+    # TokenTextSplitter uses tiktoken internally with default encoding
+    splitter = TokenTextSplitter(
+        chunk_size=chunk_size_tokens,
+        chunk_overlap=chunk_overlap_tokens,
+        separator=" "
+    )
+    
+    doc = Document(text=text)
+    nodes = splitter.get_nodes_from_documents([doc])
+    
+    # Extract text from nodes
+    chunks = [node.text for node in nodes]
+    
+    logger.debug(f"Split text into {len(chunks)} chunks using LlamaIndex TokenTextSplitter (total: {total_tokens} tokens, target: {chunk_size_tokens} tokens/chunk)")
+    return chunks if chunks else [text]
+
+
+def _get_overlap_text(text: str, overlap_tokens: int) -> str:
+    """
+    Get the last portion of text that contains approximately overlap_tokens tokens.
+    
+    Args:
+        text: Text to extract overlap from
+        overlap_tokens: Target number of tokens
+        
+    Returns:
+        Overlap text (last portion)
+    """
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        tokens = encoding.encode(text)
+        
+        if len(tokens) <= overlap_tokens:
+            return text
+        
+        # Get last overlap_tokens tokens
+        overlap_tokens_list = tokens[-overlap_tokens:]
+        return encoding.decode(overlap_tokens_list)
+    except ImportError:
+        logger.error("tiktoken is required for token-based overlap. Install with: pip install tiktoken")
+        raise ImportError("tiktoken is required for overlap calculation")
+    except Exception as e:
+        logger.error(f"Error calculating overlap: {e}")
+        raise
+
+
+def convert_json_to_toon(json_data: Dict[str, Any]) -> str:
+    """
+    Convert JSON data to TOON (Token-Oriented Object Notation) format.
+    TOON is a compact, human-readable format optimized for LLM prompts.
+    Uses the official TOON Python library: https://github.com/toon-format/toon-python
+    
+    Args:
+        json_data: Dictionary/JSON data to convert
+        
+    Returns:
+        TOON formatted string
+        
+    Raises:
+        ImportError: If TOON library is not available
+        Exception: If TOON conversion fails
+    """
+    try:
+        # Try importing the TOON library (package name may vary)
+        try:
+            from toon_format import encode
+        except ImportError:
+            try:
+                from toon import encode
+            except ImportError:
+                raise ImportError("TOON library not found. Install with: pip install toon-python or from https://github.com/toon-format/toon-python")
+        
+        return encode(json_data)
+    except ImportError as e:
+        logger.error(f"TOON library not available: {e}")
+        raise ImportError("TOON library is required. Install with: pip install toon-python or from https://github.com/toon-format/toon-python")
+    except Exception as e:
+        logger.error(f"Error converting to TOON format: {e}")
+        raise Exception(f"TOON conversion failed: {e}")
 

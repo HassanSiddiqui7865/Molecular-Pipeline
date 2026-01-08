@@ -152,8 +152,14 @@ def get_inputs_from_file(input_file_path: str = None) -> Dict[str, Any]:
     if input_file_path:
         input_file = Path(input_file_path)
     else:
-        # Try to find input.json as fallback (optional)
-        input_file = project_root / "input.json"
+        # Try to find test input file first, then fallback to input.json
+        test_input_file = project_root / "tests" / "input.test.json"
+        if test_input_file.exists():
+            input_file = test_input_file
+            logger.info(f"Using test input file: {test_input_file}")
+        else:
+            # Try to find input.json as fallback (optional)
+            input_file = project_root / "input.json"
     
     if not input_file.exists():
         # Create default test input if file doesn't exist
@@ -170,19 +176,44 @@ def get_inputs_from_file(input_file_path: str = None) -> Dict[str, Any]:
         }
     
     with open(input_file, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        data = json.load(f)
+        logger.info(f"Loaded input parameters from {input_file.name}")
+        return data
 
 
 def main():
     """Main function."""
     # Load inputs from command-line argument or use default
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.json') and Path(sys.argv[1]).exists():
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.json'):
         # First argument is an input JSON file
-        input_parameters = get_inputs_from_file(sys.argv[1])
+        input_file_path = sys.argv[1]
+        
+        # Resolve the path - try multiple locations
+        resolved_path = None
+        if Path(input_file_path).is_absolute() and Path(input_file_path).exists():
+            resolved_path = input_file_path
+        elif Path(input_file_path).exists():
+            resolved_path = str(Path(input_file_path).resolve())
+        elif (project_root / input_file_path).exists():
+            resolved_path = str(project_root / input_file_path)
+        elif (project_root / "tests" / input_file_path).exists():
+            resolved_path = str(project_root / "tests" / input_file_path)
+        elif "tests/" in input_file_path or "tests\\" in input_file_path:
+            # Handle paths like "tests/input.test.json"
+            test_file_name = Path(input_file_path).name
+            if (project_root / "tests" / test_file_name).exists():
+                resolved_path = str(project_root / "tests" / test_file_name)
+        
+        if resolved_path:
+            input_parameters = get_inputs_from_file(resolved_path)
+        else:
+            logger.warning(f"Input file not found: {input_file_path}, using default")
+            input_parameters = get_inputs_from_file()
+        
         # Remaining arguments are for search results
         search_results_file = sys.argv[2] if len(sys.argv) > 2 else None
     else:
-        # No input file specified, use default or try to find input.json
+        # No input file specified, use default or try to find tests/input.test.json or input.json
         input_parameters = get_inputs_from_file()
         search_results_file = sys.argv[1] if len(sys.argv) > 1 else None
     
@@ -260,9 +291,23 @@ def main():
     
     # Last argument: output file path (optional)
     # Determine output file based on argument position
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.json') and Path(sys.argv[1]).exists():
-        # Input file was first arg, so output is 3rd arg
-        output_file = sys.argv[3] if len(sys.argv) > 3 else None
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.json'):
+        # Check if first arg is an input file (exists or is test input)
+        first_arg_path = Path(sys.argv[1])
+        is_input_file = (
+            first_arg_path.exists() or
+            (project_root / sys.argv[1]).exists() or
+            (project_root / "tests" / sys.argv[1]).exists() or
+            sys.argv[1] == "tests/input.test.json" or
+            sys.argv[1].endswith("input.test.json")
+        )
+        
+        if is_input_file:
+            # Input file was first arg, so output is 3rd arg
+            output_file = sys.argv[3] if len(sys.argv) > 3 else None
+        else:
+            # No input file, so output is 2nd arg
+            output_file = sys.argv[2] if len(sys.argv) > 2 else None
     else:
         # No input file, so output is 2nd arg
         output_file = sys.argv[2] if len(sys.argv) > 2 else None

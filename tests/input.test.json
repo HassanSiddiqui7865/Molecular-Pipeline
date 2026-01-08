@@ -1,0 +1,36 @@
+{
+    "pathogens": [
+      {
+        "pathogen_name": "BVAB 2",
+        "pathogen_count": "1x10^5"
+      },
+      {
+        "pathogen_name": "Candida albicans",
+        "pathogen_count": "1x10^5"
+      },
+      {
+        "pathogen_name": "Gardnerella vaginalis",
+        "pathogen_count": "1x10^5"
+      },
+      {
+        "pathogen_name": "Megasphaera 1",
+        "pathogen_count": "1x10^5"
+      },
+      {
+        "pathogen_name": "Atopobium vaginae",
+        "pathogen_count": "1x10^3"
+      }
+    ],
+    "resistant_genes": [],
+    "severity_codes": [
+      "R30.9"
+    ],
+    "panel": "bacterial vaginosis or vaginitis or vaginal infection",
+    "age": 32,
+    "systemic": false,
+    "gender": "Female",
+    "allergy": [
+      "Amoxicillin",
+      "Penicillin"
+    ]
+  }

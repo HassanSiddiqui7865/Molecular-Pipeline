@@ -14,7 +14,7 @@ import random
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import format_resistance_genes, get_icd_names_from_state, create_llm, retry_with_max_attempts, RetryError
+from utils import format_resistance_genes, get_icd_names_from_state, create_llm, retry_with_max_attempts, RetryError, chunk_text_with_llamaindex
 from schemas import AntibioticMatchResult, DosageExtractionResult
 from prompts import ANTIBIOTIC_MATCH_VALIDATION_PROMPT_TEMPLATE, DOSAGE_EXTRACTION_PROMPT_TEMPLATE
 
@@ -23,30 +23,11 @@ logger = logging.getLogger(__name__)
 # LlamaIndex imports with fallback
 try:
     from llama_index.core.program import LLMTextCompletionProgram
-    from llama_index.core.node_parser import SentenceSplitter
     LLAMAINDEX_AVAILABLE = True
 except ImportError:
     logger.error("LlamaIndex not available. Install: pip install llama-index llama-index-llms-ollama")
     LLAMAINDEX_AVAILABLE = False
     LLMTextCompletionProgram = None
-    SentenceSplitter = None
-
-# NLTK imports with fallback
-try:
-    import nltk
-    NLTK_AVAILABLE = True
-    # Download punkt tokenizer if not already downloaded
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        logger.info("Downloading NLTK punkt tokenizer...")
-        nltk.download('punkt', quiet=True)
-except ImportError:
-    logger.error("NLTK not available. Install: pip install nltk")
-    NLTK_AVAILABLE = False
-except Exception as e:
-    logger.warning(f"NLTK setup issue: {e}")
-    NLTK_AVAILABLE = False
 
 try:
     from selenium import webdriver
@@ -741,87 +722,6 @@ def _scrape_drugs_com_page(url: str, antibiotic_name: str, driver: Any) -> tuple
         return None
 
 
-def _chunk_text_with_llamaindex(text: str, chunk_size: int = 6000, chunk_overlap: int = 200) -> List[str]:
-    """
-    Split text into chunks using LlamaIndex's SentenceSplitter with NLTK.
-    Maintains sentence boundaries and overlap for cross-chunk context.
-    
-    Args:
-        text: Text to chunk
-        chunk_size: Maximum size of each chunk in characters
-        chunk_overlap: Number of characters to overlap between chunks
-        
-    Returns:
-        List of text chunks
-    """
-    if not LLAMAINDEX_AVAILABLE or not NLTK_AVAILABLE:
-        logger.warning("LlamaIndex or NLTK not available, using fallback chunking")
-        return _chunk_text_fallback(text, chunk_size, chunk_overlap)
-    
-    try:
-        # Create SentenceSplitter with specified chunk size and overlap
-        splitter = SentenceSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separator=" ",
-            paragraph_separator="\n\n"
-        )
-        
-        # Split text into nodes (chunks)
-        from llama_index.core.schema import Document
-        doc = Document(text=text)
-        nodes = splitter.get_nodes_from_documents([doc])
-        
-        # Extract text from nodes
-        chunks = [node.text for node in nodes]
-        
-        logger.debug(f"Split text into {len(chunks)} chunks using LlamaIndex SentenceSplitter")
-        return chunks
-        
-    except Exception as e:
-        logger.warning(f"Error using LlamaIndex SentenceSplitter: {e}, using fallback")
-        return _chunk_text_fallback(text, chunk_size, chunk_overlap)
-
-
-def _chunk_text_fallback(text: str, chunk_size: int = 6000, overlap: int = 200) -> List[str]:
-    """
-    Fallback chunking method if LlamaIndex/NLTK is not available.
-    Split text into chunks with overlap to avoid losing context at boundaries.
-    
-    Args:
-        text: Text to chunk
-        chunk_size: Maximum size of each chunk
-        overlap: Number of characters to overlap between chunks
-        
-    Returns:
-        List of text chunks
-    """
-    if len(text) <= chunk_size:
-        return [text]
-    
-    chunks = []
-    start = 0
-    
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        
-        if end < len(text):
-            # Try to break at sentence boundaries
-            for punct in ['. ', '.\n', '! ', '!\n', '? ', '?\n']:
-                last_punct = chunk.rfind(punct)
-                if last_punct > chunk_size * 0.7:
-                    chunk = chunk[:last_punct + 1]
-                    end = start + len(chunk)
-                    break
-        
-        chunks.append(chunk)
-        start = end - overlap
-        
-        if start >= len(text):
-            break
-    
-    return chunks
 
 
 def _extract_fields_with_llamaindex(
@@ -901,12 +801,14 @@ def _extract_fields_with_llamaindex(
             if existing_fields:
                 existing_data_context = "\n".join(existing_fields)
         
-        # Chunk the content using LlamaIndex SentenceSplitter
-        chunk_size = 6000
-        chunk_overlap = 200  # Overlap for cross-chunk context
-        chunks = _chunk_text_with_llamaindex(page_content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        # Chunk the content using token-based chunking (GPT-OSS 20B: ~4k-8k tokens typical)
+        chunk_size_tokens = 6000  # Target 6k tokens per chunk
+        chunk_overlap_tokens = 200  # 200 tokens overlap for cross-chunk context
+        chunks = chunk_text_with_llamaindex(page_content, chunk_size_tokens=chunk_size_tokens, chunk_overlap_tokens=chunk_overlap_tokens)
         
-        logger.info(f"Processing {len(chunks)} chunks for {medical_name} (total length: {len(page_content)} chars)")
+        from utils import _get_token_count
+        total_tokens = _get_token_count(page_content)
+        logger.info(f"Processing {len(chunks)} chunks for {medical_name} (total: {total_tokens} tokens, {len(page_content)} chars)")
         
         # Process each chunk and accumulate results
         all_results = {
@@ -1154,10 +1056,12 @@ def _scrape_antibiotic_page(
             page_content, references = _scrape_drugs_com_page(drugs_com_url, medical_name, driver)
             
             if page_content:
-                # Calculate number of chunks
-                chunks = _chunk_text_with_llamaindex(page_content, chunk_size=6000, chunk_overlap=200)
+                # Calculate number of chunks using token-based chunking
+                chunks = chunk_text_with_llamaindex(page_content, chunk_size_tokens=6000, chunk_overlap_tokens=200)
                 num_chunks = len(chunks)
-                logger.info(f"[Thread] Successfully scraped page for {medical_name} ({num_chunks} chunks, {len(references)} references)")
+                from utils import _get_token_count
+                total_tokens = _get_token_count(page_content)
+                logger.info(f"[Thread] Successfully scraped page for {medical_name} ({num_chunks} chunks, {total_tokens} tokens, {len(references)} references)")
                 return (category, idx, page_content, missing_fields, False, num_chunks, references)
             else:
                 logger.warning(f"[Thread] Could not scrape page for {medical_name}")

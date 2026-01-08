@@ -55,7 +55,7 @@ def create_pipeline_graph() -> StateGraph:
     workflow.add_edge("icd_transform", "search")
     workflow.add_edge("search", "extract")
     workflow.add_edge("extract", "parse")
-    workflow.add_edge("parse", "rank")  # Rank not_known entries
+    workflow.add_edge("parse", "rank")  # Rank antibiotics into final categories
     workflow.add_edge("rank", "synthesize")  # Then synthesize with clean categories
     workflow.add_edge("synthesize", "enrichment")  # Enrichment processes incomplete records
     workflow.add_edge("enrichment", END)  # End after enrichment

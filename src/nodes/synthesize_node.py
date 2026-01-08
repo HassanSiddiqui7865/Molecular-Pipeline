@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
 from schemas import UnifiedResistanceGenesResult, UnifiedAntibioticEntryForSynthesis
-from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE
+from prompts import ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE_OPT, RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE_OPT
 from utils import format_resistance_genes, get_icd_names_from_state, create_llm, clean_null_strings, normalize_antibiotic_name, retry_with_max_attempts, RetryError
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def _unify_antibiotic_group_with_llm(
     # Use prompt template from prompts.py
     # All entries in this group have the same route
     route_display = route_of_administration if route_of_administration else 'null'
-    prompt = ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE.format(
+    prompt = ANTIBIOTIC_UNIFICATION_PROMPT_TEMPLATE_OPT.format(
         antibiotic_name=antibiotic_name,
         route_of_administration=route_display,
         entries_list=entries_list
@@ -164,16 +164,15 @@ def _determine_final_category(
     category_counts = {
         'first_choice': 0,
         'second_choice': 0,
-        'alternative_antibiotic': 0,
-        'not_known': 0
+        'alternative_antibiotic': 0
     }
     
     for entry in entries:
-        category = entry.get('original_category', 'not_known')
+        category = entry.get('original_category', 'first_choice')
         if category in category_counts:
             category_counts[category] += 1
     
-    # Calculate percentages (exclude not_known)
+    # Calculate percentages
     total_valid = category_counts['first_choice'] + category_counts['second_choice'] + category_counts['alternative_antibiotic']
     
     if total_valid == 0:
@@ -243,7 +242,7 @@ def _unify_resistance_genes_with_llm(
     genes_list = "\n\n".join(genes_text)
     
     # Use prompt template from prompts.py
-    prompt = RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE.format(
+    prompt = RESISTANCE_GENE_UNIFICATION_PROMPT_TEMPLATE_OPT.format(
         genes_list=genes_list
     )
 
@@ -323,7 +322,7 @@ def synthesize_node(state: Dict[str, Any]) -> Dict[str, Any]:
             source_index = source_result.get('source_index', 0)
             
             # Process all categories
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 antibiotics = therapy_plan.get(category, [])
                 if not isinstance(antibiotics, list):
                     continue

@@ -21,7 +21,6 @@ def _calculate_rank_score(
     first_choice: int,
     second_choice: int,
     alternative: int,
-    not_known: int,
     total_sources: int
 ) -> Dict[str, Any]:
     """
@@ -40,17 +39,16 @@ def _calculate_rank_score(
         first_choice: Raw count in first_choice
         second_choice: Raw count in second_choice
         alternative: Raw count in alternative_antibiotic
-        not_known: Raw count in not_known
         total_sources: Total number of sources
     
     Returns:
         Dict with final_category, confidence_score, ranking_reason, etc.
     """
-    total_occurrences = first_choice + second_choice + alternative + not_known
+    total_occurrences = first_choice + second_choice + alternative
     
     if total_occurrences == 0:
         return {
-            'final_category': 'not_known',
+            'final_category': 'alternative_antibiotic',
             'confidence_score': 0.0,
             'ranking_reason': 'No occurrences found',
             'consensus_percentage': {},
@@ -62,18 +60,17 @@ def _calculate_rank_score(
     w_second = float(second_choice)
     w_alt = float(alternative)
     
-    # Calculate percentages (exclude not_known from final ranking)
+    # Calculate percentages
     valid_total = w_first + w_second + w_alt
     if valid_total == 0:
         return {
             'final_category': 'alternative_antibiotic',
             'confidence_score': 0.0,
-            'ranking_reason': 'All occurrences in not_known category',
+            'ranking_reason': 'No valid occurrences found',
             'consensus_percentage': {
                 'first_choice': 0.0,
                 'second_choice': 0.0,
-                'alternative_antibiotic': 0.0,
-                'not_known': 1.0
+                'alternative_antibiotic': 0.0
             },
             'weighted_score': 0.0
         }
@@ -81,7 +78,6 @@ def _calculate_rank_score(
     first_pct = w_first / valid_total if valid_total > 0 else 0.0
     second_pct = w_second / valid_total if valid_total > 0 else 0.0
     alt_pct = w_alt / valid_total if valid_total > 0 else 0.0
-    not_known_pct = not_known / total_occurrences if total_occurrences > 0 else 0.0
     
     # Calculate weighted scores (category hierarchy weights)
     category_weights = {
@@ -127,8 +123,6 @@ def _calculate_rank_score(
             parts.append(f"{second_choice} second_choice")
         if alternative > 0:
             parts.append(f"{alternative} alternative")
-        if not_known > 0:
-            parts.append(f"{not_known} not_known")
         
         ranking_reason = f"Moderate consensus ({max_weighted[0]}: {max_weighted[1]:.1f} score) - {', '.join(parts)}"
     
@@ -144,8 +138,6 @@ def _calculate_rank_score(
             parts.append(f"{second_choice} second_choice")
         if alternative > 0:
             parts.append(f"{alternative} alternative")
-        if not_known > 0:
-            parts.append(f"{not_known} not_known")
         
         ranking_reason = f"Low consensus - weighted majority: {', '.join(parts)} (score: {max_weighted[1]:.1f})"
     
@@ -169,12 +161,11 @@ def _calculate_rank_score(
         'confidence_score': confidence,
         'ranking_reason': ranking_reason,
         'weighted_score': weighted_scores.get(final_category, 0.0),
-        'consensus_percentage': {
-            'first_choice': first_pct,
-            'second_choice': second_pct,
-            'alternative_antibiotic': alt_pct,
-            'not_known': not_known_pct
-        },
+            'consensus_percentage': {
+                'first_choice': first_pct,
+                'second_choice': second_pct,
+                'alternative_antibiotic': alt_pct
+            },
         'original_category_before_downgrade': original_category if original_category != final_category else None
     }
 
@@ -197,7 +188,6 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             'first_choice': 0,
             'second_choice': 0,
             'alternative_antibiotic': 0,
-            'not_known': 0,
             'original_names': set()
         })
         
@@ -205,8 +195,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
         antibiotic_original_categories = defaultdict(lambda: {
             'first_choice': 0,
             'second_choice': 0,
-            'alternative_antibiotic': 0,
-            'not_known': 0
+            'alternative_antibiotic': 0
         })
         
         total_sources = len(source_results)
@@ -224,7 +213,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
             
             # Count occurrences in each category
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 antibiotics = therapy_plan.get(category, [])
                 if isinstance(antibiotics, list):
                     for ab_entry in antibiotics:
@@ -250,7 +239,6 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 first_choice=group_data['first_choice'],
                 second_choice=group_data['second_choice'],
                 alternative=group_data['alternative_antibiotic'],
-                not_known=group_data['not_known'],
                 total_sources=total_sources
             )
             
@@ -275,7 +263,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             # Collect all antibiotics from this source
             all_antibiotics = []
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 antibiotics = therapy_plan.get(category, [])
                 if isinstance(antibiotics, list):
                     for ab_entry in antibiotics:
@@ -286,16 +274,16 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             reorganized_plan = {
                 'first_choice': [],
                 'second_choice': [],
-                'alternative_antibiotic': [],
-                'not_known': []
+                'alternative_antibiotic': []
             }
             
             for ab_entry in all_antibiotics:
                 medical_name = ab_entry.get('medical_name', '').strip()
                 if medical_name:
                     normalized_name = normalize_antibiotic_name(medical_name)
-                    final_category = final_categories.get(normalized_name, 'not_known')
-                    reorganized_plan[final_category].append(ab_entry)
+                    final_category = final_categories.get(normalized_name, 'alternative_antibiotic')
+                    if final_category in reorganized_plan:
+                        reorganized_plan[final_category].append(ab_entry)
             
             # Create updated source result
             updated_source_result = source_result.copy()
@@ -315,14 +303,13 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
         antibiotics_to_remove = {
             'first_choice': [],
             'second_choice': [],
-            'alternative_antibiotic': [],
-            'not_known': []
+            'alternative_antibiotic': []
         }
         
         for source_result in updated_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
             
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 antibiotics = therapy_plan.get(category, [])
                 if not isinstance(antibiotics, list):
                     continue
@@ -364,7 +351,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         # If systemic is None, only null routes are filtered (already handled above)
             
             # Remove filtered antibiotics from source results
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 if antibiotics_to_remove[category]:
                     # Group by source_result
                     source_to_indices = {}
@@ -390,21 +377,20 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             progress_callback('rank', 100, 'Ranking complete')
         
         # Count antibiotics in each final category
-        category_counts = {'first_choice': 0, 'second_choice': 0, 'alternative_antibiotic': 0, 'not_known': 0}
+        category_counts = {'first_choice': 0, 'second_choice': 0, 'alternative_antibiotic': 0}
         all_assignments = []
         
         # Use sets to track unique antibiotics per category
         category_antibiotics = {
             'first_choice': set(),
             'second_choice': set(),
-            'alternative_antibiotic': set(),
-            'not_known': set()
+            'alternative_antibiotic': set()
         }
         final_categories = {}
         
         for source_result in updated_source_results:
             therapy_plan = source_result.get('antibiotic_therapy_plan', {})
-            for category in ['first_choice', 'second_choice', 'alternative_antibiotic', 'not_known']:
+            for category in ['first_choice', 'second_choice', 'alternative_antibiotic']:
                 antibiotics = therapy_plan.get(category, [])
                 if isinstance(antibiotics, list):
                     for ab_entry in antibiotics:
@@ -434,8 +420,6 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 counts.append(f"second={original_cats['second_choice']}")
             if original_cats.get('alternative_antibiotic', 0) > 0:
                 counts.append(f"alt={original_cats['alternative_antibiotic']}")
-            if original_cats.get('not_known', 0) > 0:
-                counts.append(f"unknown={original_cats['not_known']}")
             
             count_str = f"({', '.join(counts)})" if counts else "(0)"
             total_occurrences = sum(original_cats.values())
@@ -457,7 +441,7 @@ def rank_node(state: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 all_assignments.append({
                     'name': original_name,
-                    'from': 'not_known',
+                    'from': 'alternative_antibiotic',
                     'to': final_category,
                     'arrow': '→',
                     'count_str': count_str,
