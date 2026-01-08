@@ -32,11 +32,11 @@ except ImportError:
 def _extract_with_llamaindex(
     content: str,
     pathogen_name: str,
-    resistant_gene: str,
+    resistant_gene: Optional[str],
     severity_codes: str,
     age: Optional[int],
     panel: str,
-    systemic: bool,
+    systemic: Optional[bool],
     pathogens: Optional[List[Dict[str, str]]] = None,
     resistant_genes_list: Optional[List[str]] = None,
     allergies: Optional[List[str]] = None,
@@ -372,7 +372,7 @@ def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
         severity_codes = get_icd_names_from_state(state)
         age = input_params.get('age')
         panel = input_params.get('panel', '')
-        systemic = input_params.get('systemic', True)
+        systemic = input_params.get('systemic')
         
         def process_source(idx: int, result_data: Dict[str, Any]) -> Dict[str, Any]:
             """Process a single search result."""
